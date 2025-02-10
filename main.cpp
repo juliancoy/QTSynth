@@ -9,7 +9,8 @@
 
 const double PI = 3.14159265358979323846;
 const int SAMPLE_RATE = 44100;
-unsigned int FRAMES_PER_BUFFER = 256;
+// Buffer size of 64 frames @ 44100Hz = ~1.45ms latency
+unsigned int FRAMES_PER_BUFFER = 64;
 const int NUM_CHANNELS = 1;
 
 class SineWaveGenerator {
@@ -87,12 +88,25 @@ int main(int argc, char* argv[]) {
     // Create audio generator
     auto generator = std::make_shared<SineWaveGenerator>();
 
-    // Initialize RtAudio
-    RtAudio dac;
-    if (dac.getDeviceCount() < 1) {
+    RtAudio dac(RtAudio::LINUX_PULSE);
+    unsigned int devices = dac.getDeviceCount();
+    if (devices < 1) {
         std::cerr << "No audio devices found!" << std::endl;
         return -1;
     }
+
+    std::cout << "Available audio devices:" << std::endl;
+    RtAudio::DeviceInfo info;
+    for (unsigned int i = 0; i < devices; i++) {
+        try {
+            info = dac.getDeviceInfo(i);
+            std::cout << "Device " << i << ": " << info.name << std::endl;
+        } catch (RtAudioErrorType &error) {
+            std::cerr << error << std::endl;
+        }
+    }
+
+
 
     // Set output parameters
     RtAudio::StreamParameters parameters;
@@ -100,11 +114,15 @@ int main(int argc, char* argv[]) {
     parameters.nChannels = NUM_CHANNELS;
     parameters.firstChannel = 0;
 
-    // Open the stream
+    // Open the stream with minimal buffering for low latency
     try {
+        RtAudio::StreamOptions options;
+        options.numberOfBuffers = 2; // Minimum number of buffers for stable playback
+        options.flags = RTAUDIO_MINIMIZE_LATENCY; // Request minimum latency
+        
         dac.openStream(&parameters, nullptr, RTAUDIO_FLOAT32,
                       SAMPLE_RATE, &FRAMES_PER_BUFFER, &audioCallback,
-                      generator.get());
+                      generator.get(), &options);
         dac.startStream();
     } catch (RtAudioErrorType& e) {
         std::cerr << "Error: " << e << std::endl;

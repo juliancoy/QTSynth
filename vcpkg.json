@@ -3,6 +3,9 @@
     "fmt",
     "qtbase",
     "qttools",
-    "rtaudio"
+    {
+      "name": "rtaudio",
+      "features": ["pulse"]
+    }
   ]
 }
