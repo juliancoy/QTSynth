@@ -8,6 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(fmt CONFIG REQUIRED)
 find_package(Qt6 COMPONENTS Core Widgets REQUIRED)
 find_package(RtAudio CONFIG REQUIRED)
+find_package(RtMidi CONFIG REQUIRED)
 
 add_executable(QTSynth main.cpp)
 
@@ -16,6 +17,7 @@ target_link_libraries(QTSynth PRIVATE
     Qt6::Core
     Qt6::Widgets
     RtAudio::rtaudio
+    RtMidi::rtmidi
 )
 
 set_target_properties(QTSynth PROPERTIES
