@@ -1,5 +1,8 @@
 {
   "dependencies": [
-    "fmt"
+    "fmt",
+    "qtbase",
+    "qttools",
+    "rtaudio"
   ]
 }
