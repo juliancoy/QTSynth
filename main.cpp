@@ -9,127 +9,14 @@
 #include <rtaudio/RtAudio.h>
 #include <rtmidi/RtMidi.h>
 #include "sample_compute.hpp"
+#include "key2note.hpp"
 #include "PianoKeyboard.hpp"
-#include <nlohmann/json.hpp>
-#include <cpp-base64/base64.h>
-#define DR_WAV_IMPLEMENTATION
-#include <dr_wav.h>
-#define DR_MP3_IMPLEMENTATION
-#include <dr_mp3.h>
 #include <cmath>
 #include <memory>
 #include <map>
 #include <vector>
 #include <mutex>
 #include <fstream>
-
-using json = nlohmann::json;
-
-// Structure to hold decoded sample data
-struct SampleData
-{
-    std::vector<float> samples;
-    int sampleRate;
-    int channels;
-};
-
-// Global map to store decoded samples
-std::map<int, SampleData> sampleNo2addy;
-std::vector<std::tuple<int, int, float>> g_key2samples; // keyTrigger, sampleNo, pitchBend
-int currSample = 0;
-
-// Decode a Base64 encoded audio sample. Load it to the enging. return its start address in the Binary Blob
-int loadRestAudioB64(const json &sample)
-{
-    // Create result structure
-    SampleData result;
-
-    // Decode Base64 to binary
-    std::string binaryData = base64_decode(sample["audioData"].get<std::string>());
-
-    std::cout << "Format: " << sample["audioFormat"] << std::endl;
-    if (sample["audioFormat"] == "wav")
-    {
-        drwav wav;
-        if (drwav_init_memory(&wav, binaryData.data(), binaryData.size(), nullptr))
-        {
-            result.samples.resize(wav.totalPCMFrameCount * wav.channels);
-            drwav_read_pcm_frames_f32(&wav, wav.totalPCMFrameCount, result.samples.data());
-            result.sampleRate = wav.sampleRate;
-            result.channels = wav.channels;
-            drwav_uninit(&wav);
-        }
-    }
-    else if (sample["audioFormat"] == "mp3")
-    {
-        drmp3 mp3;
-        if (drmp3_init_memory(&mp3, binaryData.data(), binaryData.size(), nullptr))
-        {
-            drmp3_uint64 frameCount = drmp3_get_pcm_frame_count(&mp3);
-            result.samples.resize(frameCount * mp3.channels);
-            drmp3_read_pcm_frames_f32(&mp3, frameCount, result.samples.data());
-            result.sampleRate = mp3.sampleRate;
-            result.channels = mp3.channels;
-            drmp3_uninit(&mp3);
-        }
-    }
-    else
-    {
-        std::cout << "Unknown format" << std::endl;
-    }
-    int sampleAddr = AppendSample(result.samples.data(), result.samples.size());
-    sampleNo2addy[currSample] = result;
-    currSample++;
-    return currSample - 1;
-}
-
-// Load samples from JSON file
-void loadSoundJSON(const std::string &filename)
-{
-    std::cout << "Loading " << filename << std::endl;
-
-    std::ifstream f(filename);
-    json data = json::parse(f);
-
-    // Load samplesV
-    for (const auto &instrument : data)
-    {
-        for (const auto &sample : instrument["samples"])
-        {
-            loadRestAudioB64(sample);
-        }
-    }
-
-    // Load key mappings
-    for (const auto &mapping : data[0]["key2samples"])
-    {
-        int keyTrigger = mapping[0]["keyTrigger"];
-        int sampleNo = mapping[0]["sampleNo"];
-        float pitchBend = mapping[0]["pitchBend"];
-
-        g_key2samples.emplace_back(keyTrigger, sampleNo, pitchBend);
-    }
-}
-
-void KeyStrike(int midiNote)
-{
-    if (midiNote >= 0 && midiNote < 128)
-    {
-        // Find the mapping for this key
-        for (const auto &[keyTrigger, sampleNo, pitchBend] : g_key2samples)
-        {
-            if (keyTrigger == midiNote && sampleNo2addy.count(sampleNo) > 0)
-            {
-                const auto &sampleAddy = sampleNo2addy[sampleNo];
-                int sampleLength = sample.samples.size() / sample.channels;
-
-                Strike(0.0f, sampleLength, sampleLength, 0, 0, 0,
-                       sampleAddy, 1.0f, pitchBend, 0.0f, 0.0f, 1.0f, nullptr);
-                break;
-            }
-        }
-    }
-}
 
 const double PI = 3.14159265358979323846;
 const int SAMPLE_RATE = 44100;
@@ -142,7 +29,6 @@ double midiNoteToFreq(int note)
 {
     return 440.0 * std::pow(2.0, (note - 69) / 12.0);
 }
-
 
 class SynthWindow : public QMainWindow
 {
@@ -163,64 +49,7 @@ public:
         // Enable keyboard focus
         setFocusPolicy(Qt::StrongFocus);
 
-        loadSoundJSON("Harp.json");
-
-        // Initialize key mapping (QWERTY layout mapped to musical notes)
-        // Starting from middle C (60) on the home row
-        keyToNote_ = {
-            // Numbers row (higher octave)
-            {Qt::Key_1, 72},     // C5
-            {Qt::Key_2, 74},     // D5
-            {Qt::Key_3, 76},     // E5
-            {Qt::Key_4, 77},     // F5
-            {Qt::Key_5, 79},     // G5
-            {Qt::Key_6, 81},     // A5
-            {Qt::Key_7, 83},     // B5
-            {Qt::Key_8, 84},     // C6
-            {Qt::Key_9, 86},     // D6
-            {Qt::Key_0, 88},     // E6
-            {Qt::Key_Minus, 89}, // F6
-            {Qt::Key_Equal, 91}, // G6
-
-            // Top letter row
-            {Qt::Key_Q, 67},            // G4
-            {Qt::Key_W, 69},            // A4
-            {Qt::Key_E, 71},            // B4
-            {Qt::Key_R, 72},            // C5
-            {Qt::Key_T, 74},            // D5
-            {Qt::Key_Y, 76},            // E5
-            {Qt::Key_U, 77},            // F5
-            {Qt::Key_I, 79},            // G5
-            {Qt::Key_O, 81},            // A5
-            {Qt::Key_P, 83},            // B5
-            {Qt::Key_BracketLeft, 84},  // C6
-            {Qt::Key_BracketRight, 86}, // D6
-
-            // Home row (middle)
-            {Qt::Key_A, 60},          // Middle C (C4)
-            {Qt::Key_S, 62},          // D4
-            {Qt::Key_D, 64},          // E4
-            {Qt::Key_F, 65},          // F4
-            {Qt::Key_G, 67},          // G4
-            {Qt::Key_H, 69},          // A4
-            {Qt::Key_J, 71},          // B4
-            {Qt::Key_K, 72},          // C5
-            {Qt::Key_L, 74},          // D5
-            {Qt::Key_Semicolon, 76},  // E5
-            {Qt::Key_Apostrophe, 77}, // F5
-
-            // Bottom letter row
-            {Qt::Key_Z, 48},      // C3
-            {Qt::Key_X, 50},      // D3
-            {Qt::Key_C, 52},      // E3
-            {Qt::Key_V, 53},      // F3
-            {Qt::Key_B, 55},      // G3
-            {Qt::Key_N, 57},      // A3
-            {Qt::Key_M, 59},      // B3
-            {Qt::Key_Comma, 60},  // C4
-            {Qt::Key_Period, 62}, // D4
-            {Qt::Key_Slash, 64},  // E4
-        };
+        LoadSoundJSON("Harp.json");
 
         // Initialize MIDI
         try
@@ -272,7 +101,7 @@ protected:
         if (auto it = keyToNote_.find(event->key()); it != keyToNote_.end())
         {
             keyboard_->keyPressed(it->second);
-            KeyStrike(it->second);
+            ProcessMidi(it->second);
         }
     }
 
@@ -301,7 +130,7 @@ private:
 
         if ((status & 0xF0) == 0x90 && velocity > 0)
         { // Note On
-            KeyStrike(note);
+            ProcessMidi(note);
             window->keyboard_->keyPressed(note);
         }
         else if ((status & 0xF0) == 0x80 || ((status & 0xF0) == 0x90 && velocity == 0))
@@ -314,14 +143,13 @@ private:
     PianoKeyboard *keyboard_;
     std::unique_ptr<RtMidiIn> midiIn_;
     std::vector<std::unique_ptr<RtMidiIn>> midiInputs_;
-    std::map<int, int> keyToNote_; // Maps Qt key codes to MIDI note numbers
 };
 
 int audioCallback(void *outputBuffer, void * /*inputBuffer*/, unsigned int nBufferFrames,
                   double /*streamTime*/, RtAudioStreamStatus /*status*/, void *userData)
 {
     auto *buffer = static_cast<float *>(outputBuffer);
-    Run(0);
+    Run(0, buffer);
     return 0;
 }
 

@@ -1,6 +1,27 @@
 #ifndef SAMPLE_COMPUTE_HPP
 #define SAMPLE_COMPUTE_HPP
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string>
+#include <math.h>
+#include <pthread.h>
+
+#include <nlohmann/json.hpp>
+#include <cpp-base64/base64.h>
+#include <fstream>
+#include <iostream>
+
+using json = nlohmann::json;
+
+// Structure to hold decoded sample data
+struct SampleData
+{
+    std::vector<float> samples;
+    int sampleRate;
+    int channels;
+};
+
 #define tickTime 1
 #define SAMPLE_SET_COUNT 1
 #define SAMPLE_MAX_TIME_SECONDS 15
@@ -79,7 +100,7 @@ typedef struct ThreadData{
     int threadNo;
 } ThreadData;
 
-
+// Internal "private" functions
 void Init();
 void SetPitchBend(float bend, int index);
 void UpdateDetune(float detune, int index);
@@ -88,11 +109,16 @@ int AdvanceEnvelope();
 void ApplyPanning();
 int AppendSample(const float* npArray, int npArraySize);
 void DeleteMem(int startAddr, int endAddr);
-void Run(int threadNo);
-void Strike(float sampleStartPhase, int sampleLength, int sampleEnd, int loopStart, int loopLength, int loopEnd, int voiceIndex, float voiceStrikeVolume, float voiceDetune, float patchPortamentoStart, float patchPortamentoAlpha, float patchPitchwheelReal, float* patchEnvelope);
+void Run(int threadNo, float* outputBuffer = nullptr);
+void Strike(int sampleNo, float voiceDetune, float *patchEnvelope);
 void HardStop(int voiceIndex);
 void RunMultithread();
 void Dump(const char* filename);
 void Release(int voiceIndex, float *env);
+
+// Public API
+int LoadRestAudioB64(const json &sample);
+void ProcessMidi(int midiNote);
+void LoadSoundJSON(const std::string &filename);
 
 #endif // SAMPLE_COMPUTE_HPP

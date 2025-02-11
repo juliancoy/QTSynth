@@ -1,17 +1,27 @@
 // gcc -shared -fPIC -o libsample_compute.so sample_compute.c
 
-#define M_PI 3.1415926
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <math.h>
 #include "sample_compute.hpp"
+
+#define DR_WAV_IMPLEMENTATION
+#include <dr_wav.h>
+#define DR_MP3_IMPLEMENTATION
+#include <dr_mp3.h>
 
 ThreadData threadData[NUM_THREADS];
 SampleCompute self;
 
-#include <pthread.h>
+// Extensable arrays for sample state
+std::vector<float> sampleStartPhase;
+std::vector<int> sampleLength;
+std::vector<int> sampleEnd;
+std::vector<int> loopStart;
+std::vector<int> loopLength;
+std::vector<int> loopEnd;
+std::vector<float> voiceStrikeVolume;
+std::vector<std::vector<float>> patchEnvelope; // Nested vector for envelopes
+
+int strikeIndex = 0;
+
 pthread_t threads[NUM_THREADS];
 void *threadFunction(void *threadArg)
 {
@@ -34,7 +44,7 @@ void RunMultithread()
         rc = pthread_create(&threads[t], NULL, threadFunction, (void *)&threadData[t]);
         if (rc)
         {
-            printf("ERROR; return code from pthread_create() is %d\n", rc);
+            std::cout << "ERROR; return code from pthread_create() is " << rc << std::endl;
             exit(-1);
         }
     }
@@ -65,6 +75,13 @@ void Init()
     }
 }
 
+using json = nlohmann::json;
+
+// Global map to store decoded samples
+std::map<int, std::pair<int, float>> g_key2samples; // keyTrigger -> (sampleNo, pitchBend)
+int currSample = 0;
+
+
 // Function to set the pitch bend for a specific voice
 void SetPitchBend(float bend, int index)
 {
@@ -74,7 +91,7 @@ void SetPitchBend(float bend, int index)
     }
     else
     {
-        printf("Index out of bounds in SetPitchBend\n");
+        std::cout << "Index out of bounds in SetPitchBend" << std::endl;
     }
 }
 
@@ -87,7 +104,7 @@ void UpdateDetune(float detune, int index)
     }
     else
     {
-        printf("Index out of bounds in UpdateDetune\n");
+        std::cout << "Index out of bounds in UpdateDetune" << std::endl;
     }
 }
 
@@ -101,7 +118,7 @@ int GetEnvLenPerPatch()
 int AppendSample(const float *npArray, int npArraySize)
 {
     if (npArray == NULL || npArraySize <= 0) {
-        printf("Invalid input array in AppendSample\n");
+        std::cout << "Invalid input array in AppendSample" << std::endl;
         return -1;
     }
 
@@ -119,7 +136,7 @@ int AppendSample(const float *npArray, int npArraySize)
         
         if (newBlob == NULL)
         {
-            printf("Failed to allocate memory in AppendSample\n");
+            std::cout << "Failed to allocate memory in AppendSample" << std::endl;
             return -1;
         }
         self.binaryBlob = newBlob;
@@ -131,6 +148,17 @@ int AppendSample(const float *npArray, int npArraySize)
     // Update the used size
     int sample_start = self.usedSize;
     self.usedSize += npArraySize;
+
+    // Store the Sample Details
+    sampleStartPhase.push_back(sample_start);
+    sampleLength.push_back(npArraySize);
+    sampleEnd.push_back(sample_start + npArraySize);
+
+    // TODO: Implement loop
+    loopStart.push_back(sample_start);
+    loopLength.push_back(npArraySize);
+    loopEnd.push_back(sample_start + npArraySize);
+    
     return(sample_start);
 }
 
@@ -139,7 +167,7 @@ void DeleteMem(int startAddr, int endAddr)
 {
     if (startAddr >= self.usedSize || endAddr > self.usedSize || startAddr > endAddr)
     {
-        printf("Invalid start or end address in DeleteMem\n");
+        std::cout << "Invalid start or end address in DeleteMem" << std::endl;
         return;
     }
 
@@ -150,7 +178,7 @@ void DeleteMem(int startAddr, int endAddr)
     self.usedSize -= deleteLength;
 }
 
-void Run(int threadNo, void *outputBuffer)
+void Run(int threadNo, float *outputBuffer)
 {
     float fadelen = 50000.0f;
 
@@ -273,45 +301,43 @@ void Run(int threadNo, void *outputBuffer)
 
         for (int sampleNo = 0; sampleNo < SAMPLES_PER_DISPATCH; sampleNo++)
         {
-            outputBuffer[sampleNo][0] = self.mono[sampleNo] * ((1 - depth) + rhodes);
-            outputBuffer[sampleNo][1] = self.mono[sampleNo] * ((1 - depth) - rhodes);
+            if (outputBuffer) {
+                outputBuffer[sampleNo * 2] = self.mono[sampleNo] * ((1 - depth) + rhodes);
+                outputBuffer[sampleNo * 2 + 1] = self.mono[sampleNo] * ((1 - depth) - rhodes);
+            }
         }
     }
     else
     {
         for (int sampleNo = 0; sampleNo < SAMPLES_PER_DISPATCH; sampleNo++)
         {
-            outputBuffer[sampleNo][0] = self.mono[sampleNo];
-            outputBuffer[sampleNo][1] = self.mono[sampleNo];
+            if (outputBuffer) {
+                outputBuffer[sampleNo * 2] = self.mono[sampleNo];
+                outputBuffer[sampleNo * 2 + 1] = self.mono[sampleNo];
+            }
         }
     }
 }
 
-void Strike(float sampleStartPhase, int sampleLength, int sampleEnd, int loopStart, int loopLength, int loopEnd, int voiceIndex, float voiceStrikeVolume, float voiceDetune, float patchPortamentoStart, float patchPortamentoAlpha, float patchPitchwheelReal, float *patchEnvelope)
+void Strike(int sampleNo, float voiceDetune, float *patchEnvelope)
 {
-    self.xfadeTrack[voiceIndex] = 0;
-    self.xfadeTracknot[voiceIndex] = 1;
-    self.dispatchPhase[voiceIndex] = sampleStartPhase;
-    self.slaveFade[voiceIndex] = voiceIndex;
-    self.noLoopFade[voiceIndex] = 1;
+    self.xfadeTrack[strikeIndex] = 0;
+    self.xfadeTracknot[strikeIndex] = 1;
+    self.dispatchPhase[strikeIndex] = sampleStartPhase[sampleNo];
+    self.slaveFade[strikeIndex] = strikeIndex;
+    self.noLoopFade[strikeIndex] = 1;
 
-    self.sampleLen[voiceIndex] = sampleLength;
-    self.sampleEnd[voiceIndex] = sampleEnd;
-    self.loopLength[voiceIndex] = loopLength;
-    self.loopStart[voiceIndex] = loopStart;
-    self.loopEnd[voiceIndex] = loopEnd;
-
-    self.portamento[voiceIndex] = patchPortamentoStart;
-    // Assuming the 'msg.velocity' logic is handled elsewhere and 'portamento' logic is provided
-
-    self.portamentoAlpha[voiceIndex] = patchPortamentoAlpha;
-    self.pitchBend[voiceIndex] = patchPitchwheelReal;
+    self.sampleLen[strikeIndex] = self.sampleLen[sampleNo];
+    self.sampleEnd[strikeIndex] = self.sampleEnd[sampleNo];
+    self.loopLength[strikeIndex] = self.loopLength[sampleNo];
+    self.loopStart[strikeIndex] = self.loopStart[sampleNo];
+    self.loopEnd[strikeIndex] = self.loopEnd[sampleNo];
 
     // If no patch envelope is supplied, all 1
     if(patchEnvelope == nullptr){
         for (int envIndex = 0; envIndex < ENVLENPERPATCH; envIndex++)
         {
-            int envelopeIndex = voiceIndex * ENVLENPERPATCH + envIndex;
+            int envelopeIndex = strikeIndex * ENVLENPERPATCH + envIndex;
             self.combinedEnvelope[envelopeIndex] = 1;
         }
     }
@@ -320,35 +346,42 @@ void Strike(float sampleStartPhase, int sampleLength, int sampleEnd, int loopSta
         // Assuming 'envLenPerPatch' is the length of 'patchEnvelope'
         for (int envIndex = 0; envIndex < ENVLENPERPATCH; envIndex++)
         {
-            int envelopeIndex = voiceIndex * ENVLENPERPATCH + envIndex;
+            int envelopeIndex = strikeIndex * ENVLENPERPATCH + envIndex;
             self.combinedEnvelope[envelopeIndex] = patchEnvelope[envIndex];
         }
     }
 
-    self.releaseVol[voiceIndex] = 1;
-    self.velocityVol[voiceIndex] = voiceStrikeVolume;
-    self.indexInEnvelope[voiceIndex] = voiceIndex * ENVLENPERPATCH;
-    self.voiceDetune[voiceIndex] = voiceDetune;
+    self.releaseVol[strikeIndex] = 1;
+    self.velocityVol[strikeIndex] = voiceStrikeVolume[sampleNo];
+    self.indexInEnvelope[strikeIndex] = strikeIndex * ENVLENPERPATCH;
+    self.voiceDetune[strikeIndex] = voiceDetune;
+
+    self.portamento[strikeIndex] = 1;
+    self.portamentoAlpha[strikeIndex] = 1;
+    self.portamentoTarget[strikeIndex] = 1;
+    
+    // implement Round Robin for simplicity
+    strikeIndex = (strikeIndex+1)%POLYPHONY;
 }
 
-void Release(int voiceIndex, float *env)
+void Release(int noteNo, float *env)
 {
-    self.releaseVol[voiceIndex] = self.combinedEnvelope[(int)(self.indexInEnvelope[voiceIndex])];
+    int releaseIndex = 0;
+    self.releaseVol[releaseIndex] = self.combinedEnvelope[(int)(self.indexInEnvelope[releaseIndex])];
 
     for (int envPosition = 0; envPosition < ENVLENPERPATCH; envPosition++)
     {
-        int index = voiceIndex * ENVLENPERPATCH + envPosition;
-        self.combinedEnvelope[index] = env[envPosition] * self.releaseVol[voiceIndex];
+        int index = releaseIndex * ENVLENPERPATCH + envPosition;
+        self.combinedEnvelope[releaseIndex] = env[envPosition] * self.releaseVol[releaseIndex];
     }
-
-    self.indexInEnvelope[voiceIndex] = voiceIndex * ENVLENPERPATCH;
+    self.indexInEnvelope[releaseIndex] = releaseIndex * ENVLENPERPATCH;
 }
 
-void HardStop(int voiceIndex)
+void HardStop(int strikeIndex)
 {
-    self.indexInEnvelope[voiceIndex] = voiceIndex * ENVLENPERPATCH;
-    self.releaseVol[voiceIndex] = 1.0f;
-    self.velocityVol[voiceIndex] = 0.0f;
+    self.indexInEnvelope[strikeIndex] = strikeIndex * ENVLENPERPATCH;
+    self.releaseVol[strikeIndex] = 1.0f;
+    self.velocityVol[strikeIndex] = 0.0f;
 }
 
 void Dump(const char *filename)
@@ -373,4 +406,87 @@ void Dump(const char *filename)
     }
 
     fclose(file);
+}
+
+
+// Decode a Base64 encoded audio sample. Load it to the enging. return its start address in the Binary Blob
+int LoadRestAudioB64(const json &sample)
+{
+    // Create result structure
+    SampleData result;
+
+    // Decode Base64 to binary
+    std::string binaryData = base64_decode(sample["audioData"].get<std::string>());
+
+    std::cout << "Format: " << sample["audioFormat"] << std::endl;
+    if (sample["audioFormat"] == "wav")
+    {
+        drwav wav;
+        if (drwav_init_memory(&wav, binaryData.data(), binaryData.size(), nullptr))
+        {
+            result.samples.resize(wav.totalPCMFrameCount * wav.channels);
+            drwav_read_pcm_frames_f32(&wav, wav.totalPCMFrameCount, result.samples.data());
+            result.sampleRate = wav.sampleRate;
+            result.channels = wav.channels;
+            drwav_uninit(&wav);
+        }
+    }
+    else if (sample["audioFormat"] == "mp3")
+    {
+        drmp3 mp3;
+        if (drmp3_init_memory(&mp3, binaryData.data(), binaryData.size(), nullptr))
+        {
+            drmp3_uint64 frameCount = drmp3_get_pcm_frame_count(&mp3);
+            result.samples.resize(frameCount * mp3.channels);
+            drmp3_read_pcm_frames_f32(&mp3, frameCount, result.samples.data());
+            result.sampleRate = mp3.sampleRate;
+            result.channels = mp3.channels;
+            drmp3_uninit(&mp3);
+        }
+    }
+    else
+    {
+        std::cout << "Unknown format" << std::endl;
+    }
+    int sampleAddr = AppendSample(result.samples.data(), result.samples.size());
+
+    currSample++;
+    return currSample - 1;
+}
+
+void ProcessMidi(int midiNote)
+{
+    // Find the mapping for this key
+    auto it = g_key2samples.find(midiNote);
+    if (it != g_key2samples.end()) {
+        Strike(it->second.first, it->second.second, nullptr);
+    }
+}
+
+// Load samples from JSON file
+void LoadSoundJSON(const std::string &filename)
+{
+    std::cout << "Loading " << filename << std::endl;
+
+    std::ifstream f(filename);
+    json data = json::parse(f);
+
+    // Load samplesV
+    for (const auto &instrument : data)
+    {
+        for (const auto &sample : instrument["samples"])
+        {
+            LoadRestAudioB64(sample);
+        }
+    }
+
+    // Load key mappings
+    for (const auto &mapping : data[0]["key2samples"])
+    {
+        int keyTrigger = mapping[0]["keyTrigger"];
+        int sampleNo = mapping[0]["sampleNo"];
+        float pitchBend = mapping[0]["pitchBend"];
+
+        g_key2samples[keyTrigger] = std::make_pair(sampleNo, pitchBend);
+    }
 }

@@ -9,7 +9,7 @@
     },
     "rtmidi",
     "nlohmann-json",
-    "base64",
-    "dr-libs"
+    "cpp-base64",
+    "drlibs"
   ]
 }

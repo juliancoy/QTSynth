@@ -1,7 +1,3 @@
-
-
-
-
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QMainWindow>
 #include <QtWidgets/QPushButton>
@@ -10,6 +6,10 @@
 #include <QtGui/QPainter>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QKeyEvent>
+#include <rtmidi/RtMidi.h>
+#include <map>
+#include <memory>
+#include <QDebug>
 #include "sample_compute.hpp"
 
 class PianoKey : public QWidget
@@ -60,6 +60,24 @@ public:
         setFixedHeight(160);
         setMinimumWidth(500);
 
+        try
+        {
+            midiOut = std::make_unique<RtMidiOut>();
+
+            if (midiOut->getPortCount() > 0)
+            {
+                midiOut->openPort(0); // Open the first available MIDI output port
+            }
+            else
+            {
+                qDebug() << "No MIDI output ports available.";
+            }
+        }
+        catch (RtMidiError &error)
+        {
+            qDebug() << "MIDI Error: " << error.getMessage().c_str();
+        }
+
         // Create piano keys (2 octaves starting from middle C)
         const int startNote = 60;                                       // Middle C
         const bool isBlackKey[] = {0, 1, 0, 1, 0, 0, 1, 0, 1, 0, 1, 0}; // Pattern for one octave
@@ -85,19 +103,33 @@ public:
         }
     }
 
+    ~PianoKeyboard()
+    {
+        midiOut.reset(); // Ensure MIDI output is properly closed
+    }
+
     void keyPressed(int note)
     {
-        if (auto it = keys_.find(note); it != keys_.end())
+        auto it = keys_.find(note);
+        if (it != keys_.end())
         {
+            ProcessMidi(note);
             it->second->setPressed(true);
+            activeKey_ = it->second;
         }
     }
 
     void keyReleased(int note)
     {
-        if (auto it = keys_.find(note); it != keys_.end())
+        auto it = keys_.find(note);
+        if (it != keys_.end())
         {
+            Release(note, nullptr);
             it->second->setPressed(false);
+            if (activeKey_ == it->second)
+            {
+                activeKey_ = nullptr;
+            }
         }
     }
 
@@ -107,7 +139,7 @@ protected:
         auto key = getKeyAtPosition(event->pos());
         if (key)
         {
-            KeyStrike(key->note(), 64);
+            ProcessMidi(key->note());
             key->setPressed(true);
             activeKey_ = key;
         }
@@ -147,4 +179,17 @@ private:
 
     std::map<int, PianoKey *> keys_;
     PianoKey *activeKey_; // Track currently pressed key
+    std::unique_ptr<RtMidiOut> midiOut;
+};
+
+class MainWindow : public QMainWindow
+{
+public:
+    MainWindow()
+    {
+        auto *keyboard = new PianoKeyboard(this);
+        setCentralWidget(keyboard);
+        setWindowTitle("Qt Piano with RtMIDI");
+        resize(600, 200);
+    }
 };
