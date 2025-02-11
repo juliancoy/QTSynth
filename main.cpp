@@ -5,6 +5,7 @@
 #include <QtWidgets/QWidget>
 #include <QtGui/QPainter>
 #include <QtGui/QMouseEvent>
+#include <QtGui/QKeyEvent>
 #include <rtaudio/RtAudio.h>
 #include <rtmidi/RtMidi.h>
 #include <cmath>
@@ -141,7 +142,7 @@ private:
 class PianoKeyboard : public QWidget {
 public:
     PianoKeyboard(std::shared_ptr<SineWaveGenerator> generator, QWidget* parent = nullptr)
-        : QWidget(parent), generator_(generator) {
+        : QWidget(parent), generator_(generator), activeKey_(nullptr) {
         setFixedHeight(160);
         setMinimumWidth(500);
 
@@ -184,14 +185,15 @@ protected:
         if (key) {
             generator_->noteOn(key->note(), 64);
             key->setPressed(true);
+            activeKey_ = key;
         }
     }
 
-    void mouseReleaseEvent(QMouseEvent* event) override {
-        auto key = getKeyAtPosition(event->pos());
-        if (key) {
-            generator_->noteOff(key->note());
-            key->setPressed(false);
+    void mouseReleaseEvent(QMouseEvent*) override {
+        if (activeKey_) {
+            generator_->noteOff(activeKey_->note());
+            activeKey_->setPressed(false);
+            activeKey_ = nullptr;
         }
     }
 
@@ -214,6 +216,7 @@ private:
 
     std::shared_ptr<SineWaveGenerator> generator_;
     std::map<int, PianoKey*> keys_;
+    PianoKey* activeKey_; // Track currently pressed key
 };
 
 class SynthWindow : public QMainWindow {
@@ -438,5 +441,3 @@ int main(int argc, char* argv[]) {
         dac.closeStream();
     }
 
-    return result;
-}
