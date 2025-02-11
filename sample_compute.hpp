@@ -1,3 +1,6 @@
+#ifndef SAMPLE_COMPUTE_HPP
+#define SAMPLE_COMPUTE_HPP
+
 #define tickTime 1
 #define SAMPLE_SET_COUNT 1
 #define SAMPLE_MAX_TIME_SECONDS 15
@@ -51,8 +54,6 @@ typedef struct SampleCompute
 
     float OVERVOLUME;
 
-    float pa[SAMPLES_PER_DISPATCH][OUTCHANNELS];
-
     float pitchBend[POLYPHONY];
     float portamento[POLYPHONY];
     float portamentoAlpha[POLYPHONY];
@@ -85,7 +86,7 @@ void UpdateDetune(float detune, int index);
 int GetEnvLenPerPatch();
 int AdvanceEnvelope();
 void ApplyPanning();
-int AppendSample(float* npArray, int npArraySize);
+int AppendSample(const float* npArray, int npArraySize);
 void DeleteMem(int startAddr, int endAddr);
 void Run(int threadNo);
 void Strike(float sampleStartPhase, int sampleLength, int sampleEnd, int loopStart, int loopLength, int loopEnd, int voiceIndex, float voiceStrikeVolume, float voiceDetune, float patchPortamentoStart, float patchPortamentoAlpha, float patchPitchwheelReal, float* patchEnvelope);
@@ -94,3 +95,4 @@ void RunMultithread();
 void Dump(const char* filename);
 void Release(int voiceIndex, float *env);
 
+#endif // SAMPLE_COMPUTE_HPP

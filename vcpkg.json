@@ -7,6 +7,9 @@
       "name": "rtaudio",
       "features": ["pulse"]
     },
-    "rtmidi"
+    "rtmidi",
+    "nlohmann-json",
+    "base64",
+    "dr-libs"
   ]
 }

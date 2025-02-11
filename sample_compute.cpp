@@ -52,6 +52,8 @@ void Init()
     self.loop = 0;
     self.OVERVOLUME = 1.0 / (1 << 3);
     self.binaryBlobSize = 0;
+    self.binaryBlob = NULL;  // Initialize to NULL
+    self.usedSize = 0;      // Initialize usedSize
 
     for (int voiceNo = 0; voiceNo < POLYPHONY; voiceNo++)
     {
@@ -96,17 +98,29 @@ int GetEnvLenPerPatch()
 }
 
 // Function to append data to the binaryBlob array
-int AppendSample(float *npArray, int npArraySize)
+int AppendSample(const float *npArray, int npArraySize)
 {
+    if (npArray == NULL || npArraySize <= 0) {
+        printf("Invalid input array in AppendSample\n");
+        return -1;
+    }
+
     // Check if there is enough space in the current allocation; if not, reallocate
     if (self.usedSize + npArraySize > self.binaryBlobSize)
     {
         int newSize = self.usedSize + npArraySize; // Calculate new size needed
-        float *newBlob = static_cast<float *>(realloc(self.binaryBlob, newSize * sizeof(float)));
+        float *newBlob;
+        
+        if (self.binaryBlob == NULL) {
+            newBlob = static_cast<float *>(malloc(newSize * sizeof(float)));
+        } else {
+            newBlob = static_cast<float *>(realloc(self.binaryBlob, newSize * sizeof(float)));
+        }
+        
         if (newBlob == NULL)
         {
             printf("Failed to allocate memory in AppendSample\n");
-            return;
+            return -1;
         }
         self.binaryBlob = newBlob;
         self.binaryBlobSize = newSize; // Update the total allocated size
@@ -136,30 +150,7 @@ void DeleteMem(int startAddr, int endAddr)
     self.usedSize -= deleteLength;
 }
 
-void ApplyPanning()
-{
-    if (self.panning)
-    {
-        float depth = 0.4f;
-        float rhodes = sinf(2 * M_PI * fmodf(self.lfoPhase[0], 1.0f)) * depth;
-
-        for (int sampleNo = 0; sampleNo < SAMPLES_PER_DISPATCH; sampleNo++)
-        {
-            self.pa[sampleNo][0] = self.mono[sampleNo] * ((1 - depth) + rhodes);
-            self.pa[sampleNo][1] = self.mono[sampleNo] * ((1 - depth) - rhodes);
-        }
-    }
-    else
-    {
-        for (int sampleNo = 0; sampleNo < SAMPLES_PER_DISPATCH; sampleNo++)
-        {
-            self.pa[sampleNo][0] = self.mono[sampleNo];
-            self.pa[sampleNo][1] = self.mono[sampleNo];
-        }
-    }
-}
-
-void Run(int threadNo)
+void Run(int threadNo, void *outputBuffer)
 {
     float fadelen = 50000.0f;
 
@@ -274,7 +265,26 @@ void Run(int threadNo)
         self.mono[sampleNo] = sum * self.OVERVOLUME;
     }
 
-    ApplyPanning();
+    // Apply Panning
+    if (self.panning)
+    {
+        float depth = 0.4f;
+        float rhodes = sinf(2 * M_PI * fmodf(self.lfoPhase[0], 1.0f)) * depth;
+
+        for (int sampleNo = 0; sampleNo < SAMPLES_PER_DISPATCH; sampleNo++)
+        {
+            outputBuffer[sampleNo][0] = self.mono[sampleNo] * ((1 - depth) + rhodes);
+            outputBuffer[sampleNo][1] = self.mono[sampleNo] * ((1 - depth) - rhodes);
+        }
+    }
+    else
+    {
+        for (int sampleNo = 0; sampleNo < SAMPLES_PER_DISPATCH; sampleNo++)
+        {
+            outputBuffer[sampleNo][0] = self.mono[sampleNo];
+            outputBuffer[sampleNo][1] = self.mono[sampleNo];
+        }
+    }
 }
 
 void Strike(float sampleStartPhase, int sampleLength, int sampleEnd, int loopStart, int loopLength, int loopEnd, int voiceIndex, float voiceStrikeVolume, float voiceDetune, float patchPortamentoStart, float patchPortamentoAlpha, float patchPitchwheelReal, float *patchEnvelope)
@@ -297,11 +307,22 @@ void Strike(float sampleStartPhase, int sampleLength, int sampleEnd, int loopSta
     self.portamentoAlpha[voiceIndex] = patchPortamentoAlpha;
     self.pitchBend[voiceIndex] = patchPitchwheelReal;
 
-    // Assuming 'envLenPerPatch' is the length of 'patchEnvelope'
-    for (int envIndex = 0; envIndex < ENVLENPERPATCH; envIndex++)
-    {
-        int envelopeIndex = voiceIndex * ENVLENPERPATCH + envIndex;
-        self.combinedEnvelope[envelopeIndex] = patchEnvelope[envIndex];
+    // If no patch envelope is supplied, all 1
+    if(patchEnvelope == nullptr){
+        for (int envIndex = 0; envIndex < ENVLENPERPATCH; envIndex++)
+        {
+            int envelopeIndex = voiceIndex * ENVLENPERPATCH + envIndex;
+            self.combinedEnvelope[envelopeIndex] = 1;
+        }
+    }
+    // Otherwise, load the patch env
+    else{
+        // Assuming 'envLenPerPatch' is the length of 'patchEnvelope'
+        for (int envIndex = 0; envIndex < ENVLENPERPATCH; envIndex++)
+        {
+            int envelopeIndex = voiceIndex * ENVLENPERPATCH + envIndex;
+            self.combinedEnvelope[envelopeIndex] = patchEnvelope[envIndex];
+        }
     }
 
     self.releaseVol[voiceIndex] = 1;
