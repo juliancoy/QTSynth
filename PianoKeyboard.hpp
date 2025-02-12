@@ -113,7 +113,9 @@ public:
         auto it = keys_.find(note);
         if (it != keys_.end())
         {
-            ProcessMidi(note);
+
+            std::vector<unsigned char> message = {0x90, static_cast<unsigned char>(it->first), 127}; // Note on, note, velocity 127
+            ProcessMidi(&message);
             it->second->setPressed(true);
             activeKey_ = it->second;
         }
@@ -124,7 +126,8 @@ public:
         auto it = keys_.find(note);
         if (it != keys_.end())
         {
-            Release(note, nullptr);
+            std::vector<unsigned char> message = {0x80, static_cast<unsigned char>(it->first), 127}; // Note off, note, velocity 127
+            ProcessMidi(&message);
             it->second->setPressed(false);
             if (activeKey_ == it->second)
             {
@@ -139,7 +142,8 @@ protected:
         auto key = getKeyAtPosition(event->pos());
         if (key)
         {
-            ProcessMidi(key->note());
+            std::vector<unsigned char> message = {0x90, static_cast<unsigned char>(key->note()), 127}; // Note on, note, velocity 127
+            ProcessMidi(&message);
             key->setPressed(true);
             activeKey_ = key;
         }

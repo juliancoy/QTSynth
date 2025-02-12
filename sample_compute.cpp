@@ -1,11 +1,23 @@
 // gcc -shared -fPIC -o libsample_compute.so sample_compute.c
 
 #include "sample_compute.hpp"
+#include <rtaudio/RtAudio.h>
 
 #define DR_WAV_IMPLEMENTATION
 #include <dr_wav.h>
 #define DR_MP3_IMPLEMENTATION
 #include <dr_mp3.h>
+
+
+const double PI = 3.14159265358979323846;
+const int SAMPLE_RATE = 44100;
+// Buffer size of 64 frames @ 44100Hz = ~1.45ms latency
+const int NUM_CHANNELS = 1;
+
+unsigned int FRAMES_PER_BUFFER = 64;
+
+int audioCallback(void *outputBuffer, void * /*inputBuffer*/, unsigned int nBufferFrames,
+                  double /*streamTime*/, RtAudioStreamStatus /*status*/, void *userData);
 
 ThreadData threadData[NUM_THREADS];
 SampleCompute self;
@@ -56,6 +68,8 @@ void RunMultithread()
     }
 }
 
+RtAudio dac(RtAudio::LINUX_PULSE);
+
 void Init()
 {
     self.panning = 0;
@@ -72,6 +86,54 @@ void Init()
         self.portamentoAlpha[voiceNo] = 1;
         self.portamentoTarget[voiceNo] = 1;
         self.envelopeEnd[voiceNo] = (voiceNo + 1) * ENVLENPERPATCH - 1;
+    }
+
+    // Set up RTMIDI
+    unsigned int devices = dac.getDeviceCount();
+    if (devices < 1)
+    {
+        std::cerr << "No audio devices found!" << std::endl;
+        return;
+    }
+
+    std::cout << "Available audio devices:" << std::endl;
+    RtAudio::DeviceInfo info;
+    for (unsigned int i = 0; i < devices; i++)
+    {
+        try
+        {
+            info = dac.getDeviceInfo(i);
+            std::cout << "Device " << i << ": " << info.name << std::endl;
+        }
+        catch (RtAudioErrorType &error)
+        {
+            std::cerr << error << std::endl;
+        }
+    }
+
+    // Set output parameters
+    RtAudio::StreamParameters parameters;
+    parameters.deviceId = dac.getDefaultOutputDevice();
+    parameters.nChannels = NUM_CHANNELS;
+    parameters.firstChannel = 0;
+
+    std::cout << "Opening output stream" << std::endl;
+    // Open the stream with minimal buffering for low latency
+    try
+    {
+        RtAudio::StreamOptions options;
+        options.numberOfBuffers = 2;              // Minimum number of buffers for stable playback
+        options.flags = RTAUDIO_MINIMIZE_LATENCY; // Request minimum latency
+
+        dac.openStream(&parameters, nullptr, RTAUDIO_FLOAT32,
+                       SAMPLE_RATE, &FRAMES_PER_BUFFER, &audioCallback,
+                       nullptr, &options);
+        dac.startStream();
+    }
+    catch (RtAudioErrorType &e)
+    {
+        std::cerr << "Error: " << e << std::endl;
+        return;
     }
 }
 
@@ -319,7 +381,7 @@ void Run(int threadNo, float *outputBuffer)
     }
 }
 
-void Strike(int sampleNo, float voiceDetune, float *patchEnvelope)
+void Strike(int sampleNo, float velocity, float voiceDetune, float *patchEnvelope)
 {
     self.xfadeTrack[strikeIndex] = 0;
     self.xfadeTracknot[strikeIndex] = 1;
@@ -352,7 +414,7 @@ void Strike(int sampleNo, float voiceDetune, float *patchEnvelope)
     }
 
     self.releaseVol[strikeIndex] = 1;
-    self.velocityVol[strikeIndex] = voiceStrikeVolume[sampleNo];
+    self.velocityVol[strikeIndex] = velocity;
     self.indexInEnvelope[strikeIndex] = strikeIndex * ENVLENPERPATCH;
     self.voiceDetune[strikeIndex] = voiceDetune;
 
@@ -408,6 +470,15 @@ void Dump(const char *filename)
     fclose(file);
 }
 
+void SelfDestruct(){
+    std::cout << "Clean up audio" << std::endl;
+    // Clean up audio
+    if (dac.isStreamOpen())
+    {
+        dac.stopStream();
+        dac.closeStream();
+    }
+}
 
 // Decode a Base64 encoded audio sample. Load it to the enging. return its start address in the Binary Blob
 int LoadRestAudioB64(const json &sample)
@@ -418,7 +489,7 @@ int LoadRestAudioB64(const json &sample)
     // Decode Base64 to binary
     std::string binaryData = base64_decode(sample["audioData"].get<std::string>());
 
-    std::cout << "Format: " << sample["audioFormat"] << std::endl;
+    //std::cout << "Format: " << sample["audioFormat"] << std::endl;
     if (sample["audioFormat"] == "wav")
     {
         drwav wav;
@@ -454,12 +525,29 @@ int LoadRestAudioB64(const json &sample)
     return currSample - 1;
 }
 
-void ProcessMidi(int midiNote)
+void ProcessMidi(std::vector<unsigned char> *message)
 {
-    // Find the mapping for this key
-    auto it = g_key2samples.find(midiNote);
-    if (it != g_key2samples.end()) {
-        Strike(it->second.first, it->second.second, nullptr);
+    unsigned char status = message->at(0);
+    unsigned char note = message->at(1);
+    unsigned char velocity = message->at(2);
+
+    // Note On
+    if ((status & 0xF0) == 0x90 && velocity > 0)
+    { 
+        // Find the mapping for this key
+        auto it = g_key2samples.find(note);
+        if (it != g_key2samples.end()) {
+            Strike(it->second.first, velocity, it->second.second, nullptr);
+        }
+    }
+
+    // Note Off
+    else if ((status & 0xF0) == 0x80 || ((status & 0xF0) == 0x90 && velocity == 0))
+    {
+        auto it = g_key2samples.find(note);
+        if (it != g_key2samples.end()) {
+            Release(it->second.first, nullptr);
+        }
     }
 }
 
@@ -489,4 +577,58 @@ void LoadSoundJSON(const std::string &filename)
 
         g_key2samples[keyTrigger] = std::make_pair(sampleNo, pitchBend);
     }
+}
+
+
+int audioCallback(void *outputBuffer, void * /*inputBuffer*/, unsigned int nBufferFrames,
+                  double /*streamTime*/, RtAudioStreamStatus /*status*/, void *userData)
+{
+    auto *buffer = static_cast<float *>(outputBuffer);
+    Run(0, buffer);
+    return 0;
+}
+
+void Test(){
+    std::cout << "Test mode activated" << std::endl;
+    std::cout << "Loading JSON" << std::endl;
+    LoadSoundJSON("Harp.json");
+    std::cout << "Loaded patch" << std::endl;
+    std::cout << "Processing MIDI" << std::endl;
+    
+    std::vector<unsigned char> message = {0x90, 45, 127}; // Note on, middle A, velocity 127
+    // Allocate buffer large enough for 10 seconds of audio
+    int totalSamples = SAMPLE_RATE * 10 * NUM_CHANNELS;
+    float* buffer = new float[totalSamples]();
+    ProcessMidi(&message);
+    std::cout << "Processed MIDI" << std::endl;
+    std::cout << "Running engine" << std::endl;
+    
+    // Generate 10 seconds of audio
+    int numBuffers = (SAMPLE_RATE * 10) / FRAMES_PER_BUFFER;
+    for(int i = 0; i < numBuffers; i++){
+        Run(0, buffer);
+    }
+    
+    std::cout << "Generated Buffer" << std::endl;
+    std::cout << "Writing Buffer to file" << std::endl;
+
+    // Write output to WAV file
+    drwav_data_format format;
+    format.container = drwav_container_riff;
+    format.format = DR_WAVE_FORMAT_IEEE_FLOAT;
+    format.channels = NUM_CHANNELS;
+    format.sampleRate = SAMPLE_RATE;
+    format.bitsPerSample = 32;
+    
+    drwav wav;
+    if (drwav_init_file_write(&wav, "Outfile.wav", &format, nullptr)) {
+        drwav_write_pcm_frames(&wav, totalSamples / NUM_CHANNELS, buffer);
+        drwav_uninit(&wav);
+        std::cout << "Wrote output to Outfile.wav" << std::endl;
+    } else {
+        std::cerr << "Failed to write WAV file" << std::endl;
+    }
+    
+    // Clean up the buffer
+    delete[] buffer;
 }

@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iostream>
 
+
 using json = nlohmann::json;
 
 // Structure to hold decoded sample data
@@ -118,7 +119,8 @@ void Release(int voiceIndex, float *env);
 
 // Public API
 int LoadRestAudioB64(const json &sample);
-void ProcessMidi(int midiNote);
+void ProcessMidi(std::vector<unsigned char> *message);
 void LoadSoundJSON(const std::string &filename);
+void Test();
 
 #endif // SAMPLE_COMPUTE_HPP

@@ -6,7 +6,6 @@
 #include <QtGui/QPainter>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QKeyEvent>
-#include <rtaudio/RtAudio.h>
 #include <rtmidi/RtMidi.h>
 #include "sample_compute.hpp"
 #include "key2note.hpp"
@@ -17,12 +16,7 @@
 #include <vector>
 #include <mutex>
 #include <fstream>
-
-const double PI = 3.14159265358979323846;
-const int SAMPLE_RATE = 44100;
-// Buffer size of 64 frames @ 44100Hz = ~1.45ms latency
-unsigned int FRAMES_PER_BUFFER = 64;
-const int NUM_CHANNELS = 1;
+#include <iostream>
 
 // Convert MIDI note to frequency
 double midiNoteToFreq(int note)
@@ -30,11 +24,20 @@ double midiNoteToFreq(int note)
     return 440.0 * std::pow(2.0, (note - 69) / 12.0);
 }
 
+// Print help information
+void printHelp()
+{
+    std::cout << "Qt Sine Synth - Command Line Options:\n"
+              << "  --test       Run in test mode\n"
+              << "  --help, -h   Show this help message\n";
+}
+
 class SynthWindow : public QMainWindow
 {
 public:
     SynthWindow()
     {
+        std::cout << "Initializing window" << std::endl;
         setWindowTitle("Qt Sine Synth");
         resize(600, 200);
 
@@ -49,6 +52,7 @@ public:
         // Enable keyboard focus
         setFocusPolicy(Qt::StrongFocus);
 
+        std::cout << "Loading JSON" << std::endl;
         LoadSoundJSON("Harp.json");
 
         // Initialize MIDI
@@ -98,10 +102,12 @@ protected:
         if (event->isAutoRepeat())
             return;
 
-        if (auto it = keyToNote_.find(event->key()); it != keyToNote_.end())
+        auto it = keyToNote_.find(event->key());
+        if (it != keyToNote_.end())
         {
             keyboard_->keyPressed(it->second);
-            ProcessMidi(it->second);
+            std::vector<unsigned char> message = {0x90, static_cast<unsigned char>(it->second), 127}; // Note on, note, velocity 127
+            ProcessMidi(&message);
         }
     }
 
@@ -110,7 +116,8 @@ protected:
         if (event->isAutoRepeat())
             return;
 
-        if (auto it = keyToNote_.find(event->key()); it != keyToNote_.end())
+        auto it = keyToNote_.find(event->key());
+        if (it != keyToNote_.end())
         {
             Release(event->key(), nullptr);
             keyboard_->keyReleased(it->second);
@@ -121,21 +128,20 @@ private:
     static void midiCallback(double timeStamp, std::vector<unsigned char> *message, void *userData)
     {
         auto *window = static_cast<SynthWindow *>(userData);
-        if (message->size() < 3)
-            return;
+        // send it to the synth
+        ProcessMidi(message);
 
+        // update the window appearance as well
         unsigned char status = message->at(0);
         unsigned char note = message->at(1);
         unsigned char velocity = message->at(2);
 
         if ((status & 0xF0) == 0x90 && velocity > 0)
         { // Note On
-            ProcessMidi(note);
             window->keyboard_->keyPressed(note);
         }
         else if ((status & 0xF0) == 0x80 || ((status & 0xF0) == 0x90 && velocity == 0))
         { // Note Off
-            Release(note, nullptr);
             window->keyboard_->keyReleased(note);
         }
     }
@@ -145,76 +151,32 @@ private:
     std::vector<std::unique_ptr<RtMidiIn>> midiInputs_;
 };
 
-int audioCallback(void *outputBuffer, void * /*inputBuffer*/, unsigned int nBufferFrames,
-                  double /*streamTime*/, RtAudioStreamStatus /*status*/, void *userData)
-{
-    auto *buffer = static_cast<float *>(outputBuffer);
-    Run(0, buffer);
-    return 0;
-}
-
 int main(int argc, char *argv[])
 {
+    // Handle command line arguments
+    for (int i = 1; i < argc; i++)
+    {
+        std::string arg = argv[i];
+        if (arg == "--test")
+        {
+            Test();
+            return 0;
+        }
+        else if (arg == "-h" || arg == "--help")
+        {
+            printHelp();
+            return 0;
+        }
+    }
+
     QApplication app(argc, argv);
 
-    RtAudio dac(RtAudio::LINUX_PULSE);
-    unsigned int devices = dac.getDeviceCount();
-    if (devices < 1)
-    {
-        std::cerr << "No audio devices found!" << std::endl;
-        return -1;
-    }
-
-    std::cout << "Available audio devices:" << std::endl;
-    RtAudio::DeviceInfo info;
-    for (unsigned int i = 0; i < devices; i++)
-    {
-        try
-        {
-            info = dac.getDeviceInfo(i);
-            std::cout << "Device " << i << ": " << info.name << std::endl;
-        }
-        catch (RtAudioErrorType &error)
-        {
-            std::cerr << error << std::endl;
-        }
-    }
-
-    // Set output parameters
-    RtAudio::StreamParameters parameters;
-    parameters.deviceId = dac.getDefaultOutputDevice();
-    parameters.nChannels = NUM_CHANNELS;
-    parameters.firstChannel = 0;
-
-    // Open the stream with minimal buffering for low latency
-    try
-    {
-        RtAudio::StreamOptions options;
-        options.numberOfBuffers = 2;              // Minimum number of buffers for stable playback
-        options.flags = RTAUDIO_MINIMIZE_LATENCY; // Request minimum latency
-
-        dac.openStream(&parameters, nullptr, RTAUDIO_FLOAT32,
-                       SAMPLE_RATE, &FRAMES_PER_BUFFER, &audioCallback,
-                       nullptr, &options);
-        dac.startStream();
-    }
-    catch (RtAudioErrorType &e)
-    {
-        std::cerr << "Error: " << e << std::endl;
-        return -1;
-    }
-
+    std::cout << "Creating window" << std::endl;
     // Create and show the window
     SynthWindow window;
     window.show();
 
+    std::cout << "Run the application" << std::endl;
     // Run the application
     int result = app.exec();
-
-    // Clean up audio
-    if (dac.isStreamOpen())
-    {
-        dac.stopStream();
-        dac.closeStream();
-    }
 }
