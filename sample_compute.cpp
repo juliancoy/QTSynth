@@ -8,7 +8,6 @@
 #define DR_MP3_IMPLEMENTATION
 #include <dr_mp3.h>
 
-
 const double PI = 3.14159265358979323846;
 const int SAMPLE_RATE = 44100;
 // Buffer size of 64 frames @ 44100Hz = ~1.45ms latency
@@ -46,7 +45,7 @@ void RunMultithread()
 {
     int rc;
     long t;
-    int voicesPerThread = POLYPHONY / NUM_THREADS;
+    int voicesPerThread = self.POLYPHONY / NUM_THREADS;
 
     for (t = 0; t < NUM_THREADS; t++)
     {
@@ -70,24 +69,8 @@ void RunMultithread()
 
 RtAudio dac(RtAudio::LINUX_PULSE);
 
-void Init()
+void InitAudio()
 {
-    self.panning = 0;
-    self.loop = 0;
-    self.OVERVOLUME = 1.0 / (1 << 3);
-    self.binaryBlobSize = 0;
-    self.binaryBlob = NULL;  // Initialize to NULL
-    self.usedSize = 0;      // Initialize usedSize
-
-    for (int voiceNo = 0; voiceNo < POLYPHONY; voiceNo++)
-    {
-        self.xfadeTracknot[voiceNo] = 1;
-        self.portamento[voiceNo] = 1;
-        self.portamentoAlpha[voiceNo] = 1;
-        self.portamentoTarget[voiceNo] = 1;
-        self.envelopeEnd[voiceNo] = (voiceNo + 1) * ENVLENPERPATCH - 1;
-    }
-
     // Set up RTMIDI
     unsigned int devices = dac.getDeviceCount();
     if (devices < 1)
@@ -137,17 +120,36 @@ void Init()
     }
 }
 
+void Init(int POLYPHONY)
+{
+    self.POLYPHONY = POLYPHONY;
+    self.panning = 0;
+    self.loop = 0;
+    self.OVERVOLUME = 1.0 / (1 << 3);
+    self.binaryBlob.clear(); // Initialize empty vector
+
+    for (int voiceNo = 0; voiceNo < self.POLYPHONY; voiceNo++)
+    {
+        self.xfadeTracknot[voiceNo] = 1;
+        self.portamento[voiceNo] = 1;
+        self.portamentoAlpha[voiceNo] = 1;
+        self.portamentoTarget[voiceNo] = 1;
+        self.envelopeEnd[voiceNo] = (voiceNo + 1) * ENVLENPERPATCH - 1;
+    }
+}
+
 using json = nlohmann::json;
 
-// Global map to store decoded samples
-std::map<int, std::pair<int, float>> g_key2samples; // keyTrigger -> (sampleNo, pitchBend)
-int currSample = 0;
+std::vector<std::vector<int>> g_key2sampleNo(128);
+std::vector<std::vector<float>> g_key2pitchBend(128);
+std::vector<std::vector<int>> g_key2voiceIndex(128);
 
+int currSample = 0;
 
 // Function to set the pitch bend for a specific voice
 void SetPitchBend(float bend, int index)
 {
-    if (index >= 0 && index < POLYPHONY)
+    if (index >= 0 && index < self.POLYPHONY)
     {
         self.pitchBend[index] = bend;
     }
@@ -160,7 +162,7 @@ void SetPitchBend(float bend, int index)
 // Function to update the detune value for a specific voice
 void UpdateDetune(float detune, int index)
 {
-    if (index >= 0 && index < POLYPHONY)
+    if (index >= 0 && index < self.POLYPHONY)
     {
         self.voiceDetune[index] = detune;
     }
@@ -179,37 +181,18 @@ int GetEnvLenPerPatch()
 // Function to append data to the binaryBlob array
 int AppendSample(const float *npArray, int npArraySize)
 {
-    if (npArray == NULL || npArraySize <= 0) {
+    std::cout << "appending sample length " << npArraySize << std::endl;
+    if (npArray == nullptr || npArraySize <= 0)
+    {
         std::cout << "Invalid input array in AppendSample" << std::endl;
         return -1;
     }
 
-    // Check if there is enough space in the current allocation; if not, reallocate
-    if (self.usedSize + npArraySize > self.binaryBlobSize)
-    {
-        int newSize = self.usedSize + npArraySize; // Calculate new size needed
-        float *newBlob;
-        
-        if (self.binaryBlob == NULL) {
-            newBlob = static_cast<float *>(malloc(newSize * sizeof(float)));
-        } else {
-            newBlob = static_cast<float *>(realloc(self.binaryBlob, newSize * sizeof(float)));
-        }
-        
-        if (newBlob == NULL)
-        {
-            std::cout << "Failed to allocate memory in AppendSample" << std::endl;
-            return -1;
-        }
-        self.binaryBlob = newBlob;
-        self.binaryBlobSize = newSize; // Update the total allocated size
-    }
+    // Get the current size as the starting point for this sample
+    int sample_start = self.binaryBlob.size();
 
-    // Copy new data to the end of the used portion of binaryBlob
-    memcpy(self.binaryBlob + (int)self.usedSize, npArray, npArraySize * sizeof(float));
-    // Update the used size
-    int sample_start = self.usedSize;
-    self.usedSize += npArraySize;
+    // Append the new samples to the vector
+    self.binaryBlob.insert(self.binaryBlob.end(), npArray, npArray + npArraySize);
 
     // Store the Sample Details
     sampleStartPhase.push_back(sample_start);
@@ -220,24 +203,21 @@ int AppendSample(const float *npArray, int npArraySize)
     loopStart.push_back(sample_start);
     loopLength.push_back(npArraySize);
     loopEnd.push_back(sample_start + npArraySize);
-    
-    return(sample_start);
+
+    return (sample_start);
 }
 
 // Function to delete a portion of memory from binaryBlob
 void DeleteMem(int startAddr, int endAddr)
 {
-    if (startAddr >= self.usedSize || endAddr > self.usedSize || startAddr > endAddr)
+    if (startAddr >= self.binaryBlob.size() || endAddr > self.binaryBlob.size() || startAddr > endAddr)
     {
         std::cout << "Invalid start or end address in DeleteMem" << std::endl;
         return;
     }
 
-    int deleteLength = endAddr - startAddr;
-    // Move the part after endAddr forward to startAddr
-    memmove(self.binaryBlob + startAddr, self.binaryBlob + endAddr, (self.usedSize - endAddr) * sizeof(float));
-    // Update the used size
-    self.usedSize -= deleteLength;
+    // Erase the range from the vector
+    self.binaryBlob.erase(self.binaryBlob.begin() + startAddr, self.binaryBlob.begin() + endAddr);
 }
 
 void Run(int threadNo, float *outputBuffer)
@@ -257,8 +237,8 @@ void Run(int threadNo, float *outputBuffer)
         }
     }
 
-    int voiceStart = threadNo * POLYPHONY / NUM_THREADS;
-    int voiceEnd = voiceStart + POLYPHONY / NUM_THREADS;
+    int voiceStart = threadNo * self.POLYPHONY / NUM_THREADS;
+    int voiceEnd = voiceStart + self.POLYPHONY / NUM_THREADS;
     // Process each voice
     for (int voiceNo = voiceStart; voiceNo < voiceEnd; voiceNo++)
     {
@@ -308,8 +288,8 @@ void Run(int threadNo, float *outputBuffer)
             }
 
             // Ensure indices are within bounds
-            floorIndex = floorIndex < self.binaryBlobSize ? floorIndex : self.binaryBlobSize - 1;
-            ceilIndex = ceilIndex < self.binaryBlobSize ? ceilIndex : self.binaryBlobSize - 1;
+            floorIndex = floorIndex < self.binaryBlob.size() ? floorIndex : self.binaryBlob.size() - 1;
+            ceilIndex = ceilIndex < self.binaryBlob.size() ? ceilIndex : self.binaryBlob.size() - 1;
 
             // Perform linear interpolation between the two samples
             float fraction = self.dispatchPhase[voiceNo] - floorIndex;
@@ -344,15 +324,16 @@ void Run(int threadNo, float *outputBuffer)
 
     int sampleStart = threadNo * SAMPLES_PER_DISPATCH / NUM_THREADS;
     int sampleEnd = sampleStart + SAMPLES_PER_DISPATCH / NUM_THREADS;
-    // Sum samples across polyphony and apply panning
+    // Sum samples across self.POLYPHONY and apply panning
     for (int sampleNo = sampleStart; sampleNo < sampleEnd; sampleNo++)
     {
         float sum = 0.0f;
-        for (int voiceNo = 0; voiceNo < POLYPHONY; voiceNo++)
+        for (int voiceNo = 0; voiceNo < self.POLYPHONY; voiceNo++)
         {
             sum += self.samples[voiceNo][sampleNo];
         }
-        self.mono[sampleNo] = sum * self.OVERVOLUME;
+        self.mono[sampleNo] = sampleNo;
+        // self.mono[sampleNo] = sum * self.OVERVOLUME;
     }
 
     // Apply Panning
@@ -363,7 +344,8 @@ void Run(int threadNo, float *outputBuffer)
 
         for (int sampleNo = 0; sampleNo < SAMPLES_PER_DISPATCH; sampleNo++)
         {
-            if (outputBuffer) {
+            if (outputBuffer)
+            {
                 outputBuffer[sampleNo * 2] = self.mono[sampleNo] * ((1 - depth) + rhodes);
                 outputBuffer[sampleNo * 2 + 1] = self.mono[sampleNo] * ((1 - depth) - rhodes);
             }
@@ -373,7 +355,8 @@ void Run(int threadNo, float *outputBuffer)
     {
         for (int sampleNo = 0; sampleNo < SAMPLES_PER_DISPATCH; sampleNo++)
         {
-            if (outputBuffer) {
+            if (outputBuffer)
+            {
                 outputBuffer[sampleNo * 2] = self.mono[sampleNo];
                 outputBuffer[sampleNo * 2 + 1] = self.mono[sampleNo];
             }
@@ -381,8 +364,9 @@ void Run(int threadNo, float *outputBuffer)
     }
 }
 
-void Strike(int sampleNo, float velocity, float voiceDetune, float *patchEnvelope)
+int Strike(int sampleNo, float velocity, float voiceDetune, float *patchEnvelope)
 {
+    std::cout << "Striking sample " << sampleNo << " at strike index " << strikeIndex << std::endl;
     self.xfadeTrack[strikeIndex] = 0;
     self.xfadeTracknot[strikeIndex] = 1;
     self.dispatchPhase[strikeIndex] = sampleStartPhase[sampleNo];
@@ -396,7 +380,8 @@ void Strike(int sampleNo, float velocity, float voiceDetune, float *patchEnvelop
     self.loopEnd[strikeIndex] = self.loopEnd[sampleNo];
 
     // If no patch envelope is supplied, all 1
-    if(patchEnvelope == nullptr){
+    if (patchEnvelope == nullptr)
+    {
         for (int envIndex = 0; envIndex < ENVLENPERPATCH; envIndex++)
         {
             int envelopeIndex = strikeIndex * ENVLENPERPATCH + envIndex;
@@ -404,7 +389,8 @@ void Strike(int sampleNo, float velocity, float voiceDetune, float *patchEnvelop
         }
     }
     // Otherwise, load the patch env
-    else{
+    else
+    {
         // Assuming 'envLenPerPatch' is the length of 'patchEnvelope'
         for (int envIndex = 0; envIndex < ENVLENPERPATCH; envIndex++)
         {
@@ -421,22 +407,22 @@ void Strike(int sampleNo, float velocity, float voiceDetune, float *patchEnvelop
     self.portamento[strikeIndex] = 1;
     self.portamentoAlpha[strikeIndex] = 1;
     self.portamentoTarget[strikeIndex] = 1;
-    
+
     // implement Round Robin for simplicity
-    strikeIndex = (strikeIndex+1)%POLYPHONY;
+    strikeIndex = (strikeIndex + 1) % self.POLYPHONY;
+    return (strikeIndex + self.POLYPHONY - 1) % self.POLYPHONY;
 }
 
-void Release(int noteNo, float *env)
+void Release(int voiceIndex, float *env)
 {
-    int releaseIndex = 0;
-    self.releaseVol[releaseIndex] = self.combinedEnvelope[(int)(self.indexInEnvelope[releaseIndex])];
+    self.releaseVol[voiceIndex] = self.combinedEnvelope[(int)(self.indexInEnvelope[voiceIndex])];
 
     for (int envPosition = 0; envPosition < ENVLENPERPATCH; envPosition++)
     {
-        int index = releaseIndex * ENVLENPERPATCH + envPosition;
-        self.combinedEnvelope[releaseIndex] = env[envPosition] * self.releaseVol[releaseIndex];
+        int index = voiceIndex * ENVLENPERPATCH + envPosition;
+        self.combinedEnvelope[voiceIndex] = env[envPosition] * self.releaseVol[voiceIndex];
     }
-    self.indexInEnvelope[releaseIndex] = releaseIndex * ENVLENPERPATCH;
+    self.indexInEnvelope[voiceIndex] = voiceIndex * ENVLENPERPATCH;
 }
 
 void HardStop(int strikeIndex)
@@ -446,31 +432,75 @@ void HardStop(int strikeIndex)
     self.velocityVol[strikeIndex] = 0.0f;
 }
 
+#define ELEMENTS_TO_PRINT 16
 void Dump(const char *filename)
 {
-    FILE *file = fopen(filename, "wb");
-    if (!file)
+    json output;
+
+    // Store scalar values
+    output["panning"] = self.panning;
+    output["loop"] = self.loop;
+    output["OVERVOLUME"] = self.OVERVOLUME;
+
+    // Helper function to truncate array to 128 elements
+    auto truncateArray = [](const float *arr, size_t size)
     {
-        perror("Failed to open file");
+        size_t truncSize = std::min(size_t(128), size);
+        return std::vector<float>(arr, arr + truncSize);
+    };
+
+    // Store array data (truncated to 128 elements)
+    output["lfoPhase"] = truncateArray(self.lfoPhase, LFO_COUNT);
+    output["lfoIncreasePerDispatch"] = truncateArray(self.lfoIncreasePerDispatch, LFO_COUNT);
+    output["dispatchPhase"] = truncateArray(self.dispatchPhase, ELEMENTS_TO_PRINT);
+    output["dispatchPhaseClipped"] = truncateArray(self.dispatchPhaseClipped, ELEMENTS_TO_PRINT);
+
+    // Store voice-specific arrays (truncated to 128 elements)
+    output["xfadeTracknot"] = truncateArray(self.xfadeTracknot, ELEMENTS_TO_PRINT);
+    output["xfadeTrack"] = truncateArray(self.xfadeTrack, ELEMENTS_TO_PRINT);
+    output["loopStart"] = truncateArray(self.loopStart, ELEMENTS_TO_PRINT);
+    output["loopEnd"] = truncateArray(self.loopEnd, ELEMENTS_TO_PRINT);
+    output["loopLength"] = truncateArray(self.loopLength, ELEMENTS_TO_PRINT);
+    output["slaveFade"] = truncateArray(self.slaveFade, ELEMENTS_TO_PRINT);
+    output["sampleLen"] = truncateArray(self.sampleLen, ELEMENTS_TO_PRINT);
+    output["sampleEnd"] = truncateArray(self.sampleEnd, ELEMENTS_TO_PRINT);
+    output["voiceDetune"] = truncateArray(self.voiceDetune, ELEMENTS_TO_PRINT);
+    output["noLoopFade"] = truncateArray(self.noLoopFade, ELEMENTS_TO_PRINT);
+    output["pitchBend"] = truncateArray(self.pitchBend, ELEMENTS_TO_PRINT);
+    output["portamento"] = truncateArray(self.portamento, ELEMENTS_TO_PRINT);
+    output["portamentoAlpha"] = truncateArray(self.portamentoAlpha, ELEMENTS_TO_PRINT);
+    output["portamentoTarget"] = truncateArray(self.portamentoTarget, ELEMENTS_TO_PRINT);
+    output["releaseVol"] = truncateArray(self.releaseVol, ELEMENTS_TO_PRINT);
+    output["velocityVol"] = truncateArray(self.velocityVol, ELEMENTS_TO_PRINT);
+    output["indexInEnvelope"] = truncateArray(self.indexInEnvelope, ELEMENTS_TO_PRINT);
+    output["envelopeEnd"] = truncateArray(self.envelopeEnd, ELEMENTS_TO_PRINT);
+    output["currEnvelopeVol"] = truncateArray(self.currEnvelopeVol, ELEMENTS_TO_PRINT);
+    output["nextEnvelopeVol"] = truncateArray(self.nextEnvelopeVol, ELEMENTS_TO_PRINT);
+
+    // Store combinedEnvelope (truncated to 128 elements)
+    output["combinedEnvelope"] = truncateArray(self.combinedEnvelope, self.POLYPHONY * ENVLENPERPATCH);
+
+    // Store binaryBlob data (truncated to 128 elements)
+    if (!self.binaryBlob.empty())
+    {
+        output["binaryBlob"] = truncateArray(self.binaryBlob.data(), self.binaryBlob.size());
+    }
+
+    // Write to file
+    std::ofstream file(filename);
+    if (!file.is_open())
+    {
+        std::cerr << "Failed to open file: " << filename << std::endl;
         return;
     }
 
-    // Write the struct except for the binaryBlob pointer
-    size_t sizeWithoutBlob = sizeof(SampleCompute) - sizeof(float *) - sizeof(float) - sizeof(float);
-    fwrite(&self, sizeWithoutBlob, 1, file);
-
-    // Write the binaryBlobSize, usedSize and binaryBlob data
-    fwrite(&self.binaryBlobSize, sizeof(float), 1, file);
-    fwrite(&self.usedSize, sizeof(float), 1, file);
-    if (self.binaryBlobSize > 0)
-    {
-        fwrite(self.binaryBlob, self.binaryBlobSize, 1, file);
-    }
-
-    fclose(file);
+    // Use dump with 2-space indentation but compact arrays
+    file << output.dump(2); // 2-space indentation
+    file.close();
 }
 
-void SelfDestruct(){
+void SelfDestruct()
+{
     std::cout << "Clean up audio" << std::endl;
     // Clean up audio
     if (dac.isStreamOpen())
@@ -489,7 +519,7 @@ int LoadRestAudioB64(const json &sample)
     // Decode Base64 to binary
     std::string binaryData = base64_decode(sample["audioData"].get<std::string>());
 
-    //std::cout << "Format: " << sample["audioFormat"] << std::endl;
+    // std::cout << "Format: " << sample["audioFormat"] << std::endl;
     if (sample["audioFormat"] == "wav")
     {
         drwav wav;
@@ -533,20 +563,24 @@ void ProcessMidi(std::vector<unsigned char> *message)
 
     // Note On
     if ((status & 0xF0) == 0x90 && velocity > 0)
-    { 
-        // Find the mapping for this key
-        auto it = g_key2samples.find(note);
-        if (it != g_key2samples.end()) {
-            Strike(it->second.first, velocity, it->second.second, nullptr);
+    {
+        const auto &sampleIndex = g_key2sampleNo[note];
+        const auto &pitchBends = g_key2pitchBend[note];
+
+        for (size_t i = 0; i < sampleIndex.size() && i < pitchBends.size(); i++)
+        {
+            g_key2voiceIndex[note].push_back(Strike(sampleIndex[i], velocity, pitchBends[i], nullptr));
         }
     }
 
     // Note Off
     else if ((status & 0xF0) == 0x80 || ((status & 0xF0) == 0x90 && velocity == 0))
-    {
-        auto it = g_key2samples.find(note);
-        if (it != g_key2samples.end()) {
-            Release(it->second.first, nullptr);
+    {        const auto &sampleIndex = g_key2sampleNo[note];
+        const auto &pitchBends = g_key2pitchBend[note];
+
+        for (size_t i = 0; i < sampleIndex.size() && i < pitchBends.size(); ++i)
+        {
+            Release(sampleIndex[i], nullptr);
         }
     }
 }
@@ -575,10 +609,10 @@ void LoadSoundJSON(const std::string &filename)
         int sampleNo = mapping[0]["sampleNo"];
         float pitchBend = mapping[0]["pitchBend"];
 
-        g_key2samples[keyTrigger] = std::make_pair(sampleNo, pitchBend);
+        g_key2sampleNo[keyTrigger].push_back(sampleNo);
+        g_key2pitchBend[keyTrigger].push_back(pitchBend);
     }
 }
-
 
 int audioCallback(void *outputBuffer, void * /*inputBuffer*/, unsigned int nBufferFrames,
                   double /*streamTime*/, RtAudioStreamStatus /*status*/, void *userData)
@@ -588,27 +622,33 @@ int audioCallback(void *outputBuffer, void * /*inputBuffer*/, unsigned int nBuff
     return 0;
 }
 
-void Test(){
+void Test()
+{
     std::cout << "Test mode activated" << std::endl;
+    std::cout << "Initializing with 4 polyphony" << std::endl;
+    Init(4);
     std::cout << "Loading JSON" << std::endl;
     LoadSoundJSON("Harp.json");
     std::cout << "Loaded patch" << std::endl;
     std::cout << "Processing MIDI" << std::endl;
-    
+
     std::vector<unsigned char> message = {0x90, 45, 127}; // Note on, middle A, velocity 127
     // Allocate buffer large enough for 10 seconds of audio
     int totalSamples = SAMPLE_RATE * 10 * NUM_CHANNELS;
-    float* buffer = new float[totalSamples]();
     ProcessMidi(&message);
     std::cout << "Processed MIDI" << std::endl;
     std::cout << "Running engine" << std::endl;
-    
+
     // Generate 10 seconds of audio
     int numBuffers = (SAMPLE_RATE * 10) / FRAMES_PER_BUFFER;
+    float *buffer = new float[totalSamples]();
     for(int i = 0; i < numBuffers; i++){
-        Run(0, buffer);
+    {
+        Run(0, buffer + FRAMES_PER_BUFFER);
+        Dump("dump.json");
+        break;
     }
-    
+
     std::cout << "Generated Buffer" << std::endl;
     std::cout << "Writing Buffer to file" << std::endl;
 
@@ -619,16 +659,19 @@ void Test(){
     format.channels = NUM_CHANNELS;
     format.sampleRate = SAMPLE_RATE;
     format.bitsPerSample = 32;
-    
+
     drwav wav;
-    if (drwav_init_file_write(&wav, "Outfile.wav", &format, nullptr)) {
+    if (drwav_init_file_write(&wav, "Outfile.wav", &format, nullptr))
+    {
         drwav_write_pcm_frames(&wav, totalSamples / NUM_CHANNELS, buffer);
         drwav_uninit(&wav);
         std::cout << "Wrote output to Outfile.wav" << std::endl;
-    } else {
+    }
+    else
+    {
         std::cerr << "Failed to write WAV file" << std::endl;
     }
-    
+
     // Clean up the buffer
     delete[] buffer;
 }

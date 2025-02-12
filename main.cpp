@@ -53,6 +53,7 @@ public:
         setFocusPolicy(Qt::StrongFocus);
 
         std::cout << "Loading JSON" << std::endl;
+        
         LoadSoundJSON("Harp.json");
 
         // Initialize MIDI
@@ -170,7 +171,9 @@ int main(int argc, char *argv[])
     }
 
     QApplication app(argc, argv);
-
+    Init(128);
+    InitAudio();
+    
     std::cout << "Creating window" << std::endl;
     // Create and show the window
     SynthWindow window;

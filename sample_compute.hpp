@@ -29,8 +29,8 @@ struct SampleData
 #define SAMPLE_FREQUENCY 44100
 #define SAMPLE_BUFFER_SIZE_SAMPLES 16777216
 #define SAMPLES_PER_DISPATCH 128
+#define ALLOCATED_POLYPHONY 256
 #define POLYPHONY_PER_SHADER 64
-#define POLYPHONY 256
 #define OUTCHANNELS 2
 #define NUM_THREADS 8
 #define MIDI_COUNT 128
@@ -44,55 +44,54 @@ struct SampleData
 
 typedef struct SampleCompute
 {
+    int POLYPHONY;
     float panning;
     float lfoPhase[LFO_COUNT];
     float lfoIncreasePerDispatch[LFO_COUNT];
 
-    float dispatchPhase[POLYPHONY];
-    float dispatchPhaseClipped[POLYPHONY];
+    float dispatchPhase[ALLOCATED_POLYPHONY];
+    float dispatchPhaseClipped[ALLOCATED_POLYPHONY];
 
-    float outputPhaseFloor[POLYPHONY][SAMPLES_PER_DISPATCH];
+    float outputPhaseFloor[ALLOCATED_POLYPHONY][SAMPLES_PER_DISPATCH];
 
-    float samplesNextWeighted[POLYPHONY][SAMPLES_PER_DISPATCH];
-    float samples[POLYPHONY][SAMPLES_PER_DISPATCH];
+    float samplesNextWeighted[ALLOCATED_POLYPHONY][SAMPLES_PER_DISPATCH];
+    float samples[ALLOCATED_POLYPHONY][SAMPLES_PER_DISPATCH];
     float mono[SAMPLES_PER_DISPATCH];
-    float fadeOut[POLYPHONY][SAMPLES_PER_DISPATCH];
+    float fadeOut[ALLOCATED_POLYPHONY][SAMPLES_PER_DISPATCH];
 
-    float xfadeTracknot[POLYPHONY];
-    float xfadeTrack[POLYPHONY];
+    float xfadeTracknot[ALLOCATED_POLYPHONY];
+    float xfadeTrack[ALLOCATED_POLYPHONY];
 
     float loop;
-    float loopStart[POLYPHONY];
-    float loopEnd[POLYPHONY];
-    float loopLength[POLYPHONY];
-    float slaveFade[POLYPHONY];
-    float sampleLen[POLYPHONY];
-    float sampleEnd[POLYPHONY];
-    float voiceDetune[POLYPHONY];
-    float noLoopFade[POLYPHONY];
+    float loopStart[ALLOCATED_POLYPHONY];
+    float loopEnd[ALLOCATED_POLYPHONY];
+    float loopLength[ALLOCATED_POLYPHONY];
+    float slaveFade[ALLOCATED_POLYPHONY];
+    float sampleLen[ALLOCATED_POLYPHONY];
+    float sampleEnd[ALLOCATED_POLYPHONY];
+    float voiceDetune[ALLOCATED_POLYPHONY];
+    float noLoopFade[ALLOCATED_POLYPHONY];
 
-    float accumulation[POLYPHONY][SAMPLES_PER_DISPATCH];
-    float sampleWithinDispatchPostBend[POLYPHONY][SAMPLES_PER_DISPATCH]; // Adjusted to be a 2D array
+    float accumulation[ALLOCATED_POLYPHONY][SAMPLES_PER_DISPATCH];
+    float sampleWithinDispatchPostBend[ALLOCATED_POLYPHONY][SAMPLES_PER_DISPATCH]; // Adjusted to be a 2D array
 
     float OVERVOLUME;
 
-    float pitchBend[POLYPHONY];
-    float portamento[POLYPHONY];
-    float portamentoAlpha[POLYPHONY];
-    float portamentoTarget[POLYPHONY];
+    float pitchBend[ALLOCATED_POLYPHONY];
+    float portamento[ALLOCATED_POLYPHONY];
+    float portamentoAlpha[ALLOCATED_POLYPHONY];
+    float portamentoTarget[ALLOCATED_POLYPHONY];
 
-    float *binaryBlob;    // Dynamically sized array for binary blob data
-    float binaryBlobSize; // Total allocated memory size for binaryBlob
-    float usedSize;       // Amount of binaryBlob that is currently in use
+    std::vector<float> binaryBlob; // Vector for binary blob data
 
-    float releaseVol[POLYPHONY];
-    float combinedEnvelope[POLYPHONY * ENVLENPERPATCH]; // Size needs to be defined
-    float velocityVol[POLYPHONY];
-    float indexInEnvelope[POLYPHONY];
-    float envelopeEnd[POLYPHONY];
+    float releaseVol[ALLOCATED_POLYPHONY];
+    float combinedEnvelope[ALLOCATED_POLYPHONY * ENVLENPERPATCH]; // Size needs to be defined
+    float velocityVol[ALLOCATED_POLYPHONY];
+    float indexInEnvelope[ALLOCATED_POLYPHONY];
+    float envelopeEnd[ALLOCATED_POLYPHONY];
 
-    float currEnvelopeVol[POLYPHONY];
-    float nextEnvelopeVol[POLYPHONY];
+    float currEnvelopeVol[ALLOCATED_POLYPHONY];
+    float nextEnvelopeVol[ALLOCATED_POLYPHONY];
 
 } SampleCompute;
 
@@ -102,7 +101,8 @@ typedef struct ThreadData{
 } ThreadData;
 
 // Internal "private" functions
-void Init();
+void Init(int POLYPHONY);
+void InitAudio();
 void SetPitchBend(float bend, int index);
 void UpdateDetune(float detune, int index);
 int GetEnvLenPerPatch();
@@ -111,7 +111,7 @@ void ApplyPanning();
 int AppendSample(const float* npArray, int npArraySize);
 void DeleteMem(int startAddr, int endAddr);
 void Run(int threadNo, float* outputBuffer = nullptr);
-void Strike(int sampleNo, float voiceDetune, float *patchEnvelope);
+int Strike(int sampleNo, float voiceDetune, float *patchEnvelope);
 void HardStop(int voiceIndex);
 void RunMultithread();
 void Dump(const char* filename);
