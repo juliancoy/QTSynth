@@ -11,7 +11,7 @@
 #include <cpp-base64/base64.h>
 #include <fstream>
 #include <iostream>
-
+#include <mutex>
 
 using json = nlohmann::json;
 
@@ -28,90 +28,96 @@ struct SampleData
 #define SAMPLE_MAX_TIME_SECONDS 15
 #define SAMPLE_FREQUENCY 44100
 #define SAMPLE_BUFFER_SIZE_SAMPLES 16777216
-#define SAMPLES_PER_DISPATCH 128
+#define MAX_SAMPLES_PER_DISPATCH 128
 #define ALLOCATED_POLYPHONY 256
 #define POLYPHONY_PER_SHADER 64
 #define OUTCHANNELS 2
-#define NUM_THREADS 8
 #define MIDI_COUNT 128
 #define LOOP 0
-#define LFO_COUNT 16
 #define INCHANNELS 1
 #define FILTER_STEPS 512
-#define ENVLENPERPATCH 512
 #define ENVELOPE_LENGTH 512
 // cdef.h
 
 typedef struct SampleCompute
 {
-    int POLYPHONY;
+    int polyphony;
     float panning;
-    float lfoPhase[LFO_COUNT];
-    float lfoIncreasePerDispatch[LFO_COUNT];
 
-    float dispatchPhase[ALLOCATED_POLYPHONY];
-    float dispatchPhaseClipped[ALLOCATED_POLYPHONY];
+    std::vector<float> lfoPhase;
+    std::vector<float> lfoIncreasePerDispatch;
 
-    float outputPhaseFloor[ALLOCATED_POLYPHONY][SAMPLES_PER_DISPATCH];
+    std::vector<float> dispatchPhase;
+    std::vector<float> dispatchPhaseClipped;
 
-    float samplesNextWeighted[ALLOCATED_POLYPHONY][SAMPLES_PER_DISPATCH];
-    float samples[ALLOCATED_POLYPHONY][SAMPLES_PER_DISPATCH];
-    float mono[SAMPLES_PER_DISPATCH];
-    float fadeOut[ALLOCATED_POLYPHONY][SAMPLES_PER_DISPATCH];
+    std::vector<std::vector<float>> outputPhaseFloor;
+    std::vector<std::vector<float>> samplesNextWeighted;
+    std::vector<std::vector<float>> samples;
+    std::vector<float> left;
+    std::vector<float> right;
+    std::vector<std::vector<float>> fadeOut;
 
-    float xfadeTracknot[ALLOCATED_POLYPHONY];
-    float xfadeTrack[ALLOCATED_POLYPHONY];
+    std::vector<float> xfadeTracknot;
+    std::vector<float> xfadeTrack;
 
     float loop;
-    float loopStart[ALLOCATED_POLYPHONY];
-    float loopEnd[ALLOCATED_POLYPHONY];
-    float loopLength[ALLOCATED_POLYPHONY];
-    float slaveFade[ALLOCATED_POLYPHONY];
-    float sampleLen[ALLOCATED_POLYPHONY];
-    float sampleEnd[ALLOCATED_POLYPHONY];
-    float voiceDetune[ALLOCATED_POLYPHONY];
-    float noLoopFade[ALLOCATED_POLYPHONY];
+    std::vector<float> loopStart;
+    std::vector<float> loopEnd;
+    std::vector<float> loopLength;
+    std::vector<float> slaveFade;
+    std::vector<float> sampleLen;
+    std::vector<float> sampleEnd;
+    std::vector<float> voiceDetune;
+    std::vector<float> noLoopFade;
 
-    float accumulation[ALLOCATED_POLYPHONY][SAMPLES_PER_DISPATCH];
-    float sampleWithinDispatchPostBend[ALLOCATED_POLYPHONY][SAMPLES_PER_DISPATCH]; // Adjusted to be a 2D array
+    std::vector<std::vector<float>> accumulation;
+    std::vector<std::vector<float>> sampleWithinDispatchPostBend;
 
+    std::vector<std::vector<int>> key2sampleIndex;
+    std::vector<std::vector<float>> key2sampleDetune;
+    std::vector<std::vector<int>> key2voiceIndex;
+
+    json key2samples; 
     float OVERVOLUME;
 
-    float pitchBend[ALLOCATED_POLYPHONY];
-    float portamento[ALLOCATED_POLYPHONY];
-    float portamentoAlpha[ALLOCATED_POLYPHONY];
-    float portamentoTarget[ALLOCATED_POLYPHONY];
+    std::vector<float> pitchBend;
+    std::vector<float> portamento;
+    std::vector<float> portamentoAlpha;
+    std::vector<float> portamentoTarget;
 
-    std::vector<float> binaryBlob; // Vector for binary blob data
+    std::mutex blobMutex;
+    std::vector<float> binaryBlob;
 
-    float releaseVol[ALLOCATED_POLYPHONY];
-    float combinedEnvelope[ALLOCATED_POLYPHONY * ENVLENPERPATCH]; // Size needs to be defined
-    float velocityVol[ALLOCATED_POLYPHONY];
-    float indexInEnvelope[ALLOCATED_POLYPHONY];
-    float envelopeEnd[ALLOCATED_POLYPHONY];
+    std::vector<float> releaseVol;
+    std::vector<float> combinedEnvelope;
+    std::vector<float> velocityVol;
+    std::vector<float> indexInEnvelope;
+    std::vector<int> envelopeEnd;
 
-    float currEnvelopeVol[ALLOCATED_POLYPHONY];
-    float nextEnvelopeVol[ALLOCATED_POLYPHONY];
-
+    std::vector<float> currEnvelopeVol;
+    std::vector<float> nextEnvelopeVol;
+    int lfoCount;
+    int samplesPerDispatch;
 } SampleCompute;
 
 typedef struct ThreadData{
     SampleCompute *sampleCompute;
+    int threadCount;
     int threadNo;
 } ThreadData;
 
 // Internal "private" functions
-void Init(int POLYPHONY);
+void Init(int polyphony, int maxSamplesPerDispatch, int lfoCount, int envLenPerPatch);
 void InitAudio();
 void SetPitchBend(float bend, int index);
 void UpdateDetune(float detune, int index);
 int GetEnvLenPerPatch();
 int AdvanceEnvelope();
 void ApplyPanning();
-int AppendSample(const float* npArray, int npArraySize);
+int AppendSample(std::vector<float> npArray);
 void DeleteMem(int startAddr, int endAddr);
-void Run(int threadNo, float* outputBuffer = nullptr);
-int Strike(int sampleNo, float voiceDetune, float *patchEnvelope);
+void Run(int threadNo, int numThreads, float *outputBuffer);
+int Strike(int sampleNo, float velocity, float voiceDetune, float *patchEnvelope);
 void HardStop(int voiceIndex);
 void RunMultithread();
 void Dump(const char* filename);

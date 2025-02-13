@@ -1,3 +1,5 @@
 build
 vcpkg_installed
-Outfile.wav
+*.wav
+dump.json
+sample_info.json

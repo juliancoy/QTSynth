@@ -171,7 +171,7 @@ int main(int argc, char *argv[])
     }
 
     QApplication app(argc, argv);
-    Init(128);
+    Init(128, 128, 16, 2056);
     InitAudio();
     
     std::cout << "Creating window" << std::endl;
