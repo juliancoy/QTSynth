@@ -173,12 +173,14 @@ void Init(int polyphony, int samplesPerDispatch, int lfoCount, int envLenPerPatc
 {
     self.samplesPerDispatch = samplesPerDispatch;
     self.polyphony = polyphony;
-    self.panning = 0;
+    self.rhodesEffect = 0;
     self.loop = 0;
     self.OVERVOLUME = 1.0 / (1 << 3);
     self.binaryBlob.clear(); // Initialize empty vector
 
     self.polyphony = polyphony;
+
+    self.rhodesEffect.resize(self.outchannels, 0.0f);
 
     self.lfoCount = lfoCount;
     self.lfoPhase.resize(lfoCount, 0.0f);
@@ -188,7 +190,7 @@ void Init(int polyphony, int samplesPerDispatch, int lfoCount, int envLenPerPatc
     self.dispatchPhaseClipped.resize(polyphony, 0.0f);
 
     self.outputPhaseFloor.resize(polyphony, std::vector<float>(self.samplesPerDispatch, 0.0f));
-    self.samples.resize(polyphony, std::vector<float>(self.samplesPerDispatch, 0.0f));
+    self.samples.resize(2, std::vector<std::vector<float>>(polyphony, std::vector<float>(self.samplesPerDispatch, 0.0f)));
     self.fadeOut.resize(polyphony, std::vector<float>(self.samplesPerDispatch, 0.0f));
     self.accumulation.resize(polyphony, std::vector<float>(self.samplesPerDispatch, 0.0f));
     self.sampleWithinDispatchPostBend.resize(polyphony, std::vector<float>(self.samplesPerDispatch, 0.0f));
@@ -202,8 +204,7 @@ void Init(int polyphony, int samplesPerDispatch, int lfoCount, int envLenPerPatc
     self.key2sampleIndex.resize(MIDI_KEY_COUNT);
     self.key2sampleDetune.resize(MIDI_KEY_COUNT);
     self.key2voiceIndex.resize(MIDI_KEY_COUNT);
-
-    self.mono.resize(self.samplesPerDispatch, 0.0f);
+    self.sampleIndex2ChannelVol.resize();
 
     self.xfadeTracknot.resize(polyphony, 1.0f);
     self.xfadeTrack.resize(polyphony, 0.0f);
@@ -229,7 +230,6 @@ void Init(int polyphony, int samplesPerDispatch, int lfoCount, int envLenPerPatc
 
     self.currEnvelopeVol.resize(polyphony, 0.0f);
     self.nextEnvelopeVol.resize(polyphony, 0.0f);
-
 }
 
 using json = nlohmann::json;
@@ -279,7 +279,7 @@ int AppendSample(std::vector<float> sample_array)
     {
         std::cout << keyAction << std::endl;
 
-        for (const auto &entry : keyAction)  // Iterate over all elements in the mapping
+        for (const auto &entry : keyAction) // Iterate over all elements in the mapping
         {
             int keyTrigger = entry["keyTrigger"];
             int patchSampleNo = entry["sampleNo"];
@@ -353,6 +353,17 @@ void Run(int threadNo, int numThreads, float *outputBuffer)
         }
     }
 
+
+    // if rhodes effect is on, sweep the sound from left to right
+    float volRight;
+    float depth = 0.4f;
+    for (int channel = 0; channel < self.outchannels; channel++){
+        if (self.rhodesEffectOn)
+            self.rhodesEffect[channel] = ((1 - depth) + sinf(2 * M_PI * fmodf(self.lfoPhase[0] + 1.0/self.outchannels, 1.0f)) * depth);
+        else
+            self.rhodesEffect[channel] = 1;
+    }
+
     int voiceStart = threadNo * self.polyphony / numThreads;
     int voiceEnd = voiceStart + self.polyphony / numThreads;
     // Process each voice
@@ -418,9 +429,10 @@ void Run(int threadNo, int numThreads, float *outputBuffer)
             thisSample = self.binaryBlob[floorIndex];
             nextSample = self.binaryBlob[ceilIndex];
 
-            self.samples[voiceNo][sampleNo] = thisSample * (1.0f - fraction) + nextSample * fraction;
-            self.samples[voiceNo][sampleNo] *= multiplier;
-
+            for (int channel = 0; channel < self.outchannels; channel++)
+            {
+                self.samples[channel][voiceNo][sampleNo] = (thisSample * (1.0f - fraction) + nextSample * fraction) * self.OVERVOLUME * self.channelVol[voiceNo][channel] * self.rhodesEffect[channel];
+            }
             // Apply fade out if needed
             if (0)
             {
@@ -436,7 +448,7 @@ void Run(int threadNo, int numThreads, float *outputBuffer)
                 self.fadeOut[voiceNo][sampleNo] = fmaxf(self.fadeOut[voiceNo][sampleNo], self.noLoopFade[voiceNo]);
 
                 // Apply fadeOut to samples
-                self.samples[voiceNo][sampleNo] *= self.fadeOut[voiceNo][sampleNo];
+                self.samples[0][voiceNo][sampleNo] *= self.fadeOut[voiceNo][sampleNo];
             }
         }
         if (self.dispatchPhase[voiceNo] >= self.sampleEnd[voiceNo] && self.loop)
@@ -447,40 +459,15 @@ void Run(int threadNo, int numThreads, float *outputBuffer)
 
     int sampleStart = threadNo * self.samplesPerDispatch / numThreads;
     int sampleEnd = sampleStart + self.samplesPerDispatch / numThreads;
-    // Sum samples across self.polyphony and apply panning
+
+    // Sum samples across polyphony and interleave channels
     for (int sampleNo = sampleStart; sampleNo < sampleEnd; sampleNo++)
     {
-        float sum = 0.0f;
         for (int voiceNo = 0; voiceNo < self.polyphony; voiceNo++)
         {
-            sum += self.samples[voiceNo][sampleNo];
-        }
-        self.mono[sampleNo] = sum * self.OVERVOLUME;
-    }
-
-    // Apply Panning
-    if (self.panning)
-    {
-        float depth = 0.4f;
-        float rhodes = sinf(2 * M_PI * fmodf(self.lfoPhase[0], 1.0f)) * depth;
-
-        for (int sampleNo = 0; sampleNo < self.samplesPerDispatch; sampleNo++)
-        {
-            if (outputBuffer)
-            {
-                outputBuffer[sampleNo * 2] = self.mono[sampleNo] * ((1 - depth) + rhodes);
-                outputBuffer[sampleNo * 2 + 1] = self.mono[sampleNo] * ((1 - depth) - rhodes);
-            }
-        }
-    }
-    else
-    {
-        for (int sampleNo = 0; sampleNo < self.samplesPerDispatch; sampleNo++)
-        {
-            if (outputBuffer)
-            {
-                outputBuffer[sampleNo * 2] = self.mono[sampleNo];
-                outputBuffer[sampleNo * 2 + 1] = self.mono[sampleNo];
+            for (int channel = 0; channel < self.outchannels; channel++){
+                float thisSample = self.samples[channel][voiceNo][sampleNo];
+                outputBuffer[sampleNo * 2 + channel] += thisSample;
             }
         }
     }
@@ -560,7 +547,7 @@ void Dump(const char *filename)
     json output;
 
     // Store scalar values
-    output["panning"] = self.panning;
+    output["panning"] = self.rhodesEffect;
     output["loop"] = self.loop;
     output["OVERVOLUME"] = self.OVERVOLUME;
 
@@ -613,7 +600,6 @@ void Dump(const char *filename)
     file.close();
 }
 
-
 void DumpSampleInfo(const char *filename)
 {
     json output;
@@ -635,7 +621,6 @@ void DumpSampleInfo(const char *filename)
     file << output.dump(2); // 2-space indentation
     file.close();
 }
-
 
 void SelfDestruct()
 {
@@ -737,9 +722,9 @@ void ProcessMidi(std::vector<unsigned char> *message)
 
         for (size_t i = 0; i < voicesToRelease; ++i)
         {
-            int frontValue = self.key2voiceIndex[midi_key].front();                 // Get the first element
+            int frontValue = self.key2voiceIndex[midi_key].front();                     // Get the first element
             self.key2voiceIndex[midi_key].erase(self.key2voiceIndex[midi_key].begin()); // Remove the first element
-            Release(frontValue, nullptr);                                       // Pass the value to Release()
+            Release(frontValue, nullptr);                                               // Pass the value to Release()
         }
     }
 }
@@ -813,7 +798,7 @@ void Test()
 
         if (i == 0)
         {
-            //Dump("dump.json"); // Only dump first buffer for debugging
+            // Dump("dump.json"); // Only dump first buffer for debugging
         }
     }
 

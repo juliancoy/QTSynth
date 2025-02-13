@@ -42,7 +42,6 @@ struct SampleData
 typedef struct SampleCompute
 {
     int polyphony;
-    float panning;
 
     std::vector<float> lfoPhase;
     std::vector<float> lfoIncreasePerDispatch;
@@ -52,14 +51,15 @@ typedef struct SampleCompute
 
     std::vector<std::vector<float>> outputPhaseFloor;
     std::vector<std::vector<float>> samplesNextWeighted;
-    std::vector<std::vector<float>> samples;
-    std::vector<float> left;
-    std::vector<float> right;
+    std::vector<std::vector<std::vector<float>>> samples;
     std::vector<std::vector<float>> fadeOut;
 
+    bool rhodesEffectOn = false;
+    std::vector<float> rhodesEffect;
     std::vector<float> xfadeTracknot;
     std::vector<float> xfadeTrack;
 
+    int outchannels=2;
     float loop;
     std::vector<float> loopStart;
     std::vector<float> loopEnd;
@@ -76,6 +76,7 @@ typedef struct SampleCompute
     std::vector<std::vector<int>> key2sampleIndex;
     std::vector<std::vector<float>> key2sampleDetune;
     std::vector<std::vector<int>> key2voiceIndex;
+    std::vector<std::vector<int>> sampleIndex2ChannelVol;
 
     json key2samples; 
     float OVERVOLUME;
