@@ -4,26 +4,31 @@ project(QTSynth VERSION 0.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+list(APPEND CMAKE_PREFIX_PATH "/home/julian/Documents/QTSynth/vcpkg_installed/x64-linux")
 
 find_package(fmt CONFIG REQUIRED)
 find_package(Qt6 COMPONENTS Core Widgets REQUIRED)
 find_package(RtAudio CONFIG REQUIRED)
 find_package(RtMidi CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
-# Add the include directory
-include_directories(${VCPKG_INSTALLED_DIR}/x64-linux/include/cpp-base64)
+find_package(Tracy CONFIG REQUIRED)
 
-# Add your executable
+# Add the include directory for cpp-base64 using target_include_directories
+include_directories(/home/julian/Documents/QTSynth/vcpkg_installed/x64-linux/include/cpp-base64)
+
 add_executable(QTSynth 
     main.cpp
     sample_compute.cpp
-    ${VCPKG_INSTALLED_DIR}/x64-linux/include/cpp-base64/base64.cpp)  # Include base64.cpp
+    /home/julian/Documents/QTSynth/vcpkg_installed/x64-linux/include/cpp-base64/base64.cpp
+)
+
 
 target_link_libraries(QTSynth PRIVATE 
     fmt::fmt
     Qt6::Core
     Qt6::Widgets
     RtAudio::rtaudio
+    Tracy::TracyClient
     RtMidi::rtmidi
     nlohmann_json::nlohmann_json
 )

@@ -1,15 +1,18 @@
 {
   "dependencies": [
+    "cpp-base64",
+    "drlibs",
     "fmt",
+    "nlohmann-json",
     "qtbase",
     "qttools",
     {
       "name": "rtaudio",
-      "features": ["pulse"]
+      "features": [
+        "pulse"
+      ]
     },
     "rtmidi",
-    "nlohmann-json",
-    "cpp-base64",
-    "drlibs"
+    "tracy"
   ]
 }

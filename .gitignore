@@ -3,3 +3,8 @@ vcpkg_installed
 *.wav
 dump.json
 sample_info.json
+CMakeFiles
+CMakeCache.txt
+.qt
+Makefile
+cmake_install.cmake

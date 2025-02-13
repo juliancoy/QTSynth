@@ -61,13 +61,14 @@ typedef struct SampleCompute
 
     int outchannels=2;
     float loop;
-    std::vector<float> loopStart;
-    std::vector<float> loopEnd;
-    std::vector<float> loopLength;
+    std::vector<float> voiceLoopStart;
+    std::vector<float> voiceLoopEnd;
+    std::vector<float> voiceLoopLength;
     std::vector<float> slaveFade;
-    std::vector<float> sampleLen;
-    std::vector<float> sampleEnd;
+    std::vector<float> voiceLen;
+    std::vector<float> voiceEnd;
     std::vector<float> voiceDetune;
+    std::vector<std::vector<float>> voiceChannelVol;
     std::vector<float> noLoopFade;
 
     std::vector<std::vector<float>> accumulation;
@@ -76,7 +77,6 @@ typedef struct SampleCompute
     std::vector<std::vector<int>> key2sampleIndex;
     std::vector<std::vector<float>> key2sampleDetune;
     std::vector<std::vector<int>> key2voiceIndex;
-    std::vector<std::vector<int>> sampleIndex2ChannelVol;
 
     json key2samples; 
     float OVERVOLUME;
@@ -129,5 +129,17 @@ int LoadRestAudioB64(const json &sample);
 void ProcessMidi(std::vector<unsigned char> *message);
 void LoadSoundJSON(const std::string &filename);
 void Test();
+
+
+/*
+// 5.1 surround angles (excluding LFE)
+std::vector<float> channelAngles5_1 = {
+    -30.0f * M_PI / 180.0f,  // Front Left
+    0.0f * M_PI / 180.0f,   // Center
+    30.0f * M_PI / 180.0f,  // Front Right
+    -110.0f * M_PI / 180.0f, // Surround Left
+    110.0f * M_PI / 180.0f  // Surround Right
+};
+*/
 
 #endif // SAMPLE_COMPUTE_HPP
