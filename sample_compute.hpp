@@ -15,28 +15,14 @@
 
 using json = nlohmann::json;
 
-// Structure to hold decoded sample data
-struct SampleData
-{
-    std::vector<float> samples;
-    int sampleRate;
-    int channels;
-};
-
 #define tickTime 1
 #define SAMPLE_SET_COUNT 1
 #define SAMPLE_MAX_TIME_SECONDS 15
 #define SAMPLE_FREQUENCY 44100
 #define SAMPLE_BUFFER_SIZE_SAMPLES 16777216
-#define MAX_SAMPLES_PER_DISPATCH 128
-#define ALLOCATED_POLYPHONY 256
-#define POLYPHONY_PER_SHADER 64
-#define OUTCHANNELS 2
 #define MIDI_COUNT 128
 #define LOOP 0
-#define INCHANNELS 1
 #define FILTER_STEPS 512
-#define ENVELOPE_LENGTH 512
 // cdef.h
 
 typedef struct SampleCompute
@@ -59,7 +45,8 @@ typedef struct SampleCompute
     std::vector<float> xfadeTracknot;
     std::vector<float> xfadeTrack;
 
-    int outchannels=2;
+    int outchannels;
+    int envLenPerPatch;
     float loop;
     std::vector<float> voiceLoopStart;
     std::vector<float> voiceLoopEnd;
@@ -68,7 +55,8 @@ typedef struct SampleCompute
     std::vector<float> voiceLen;
     std::vector<float> voiceEnd;
     std::vector<float> voiceDetune;
-    std::vector<std::vector<float>> voiceChannelVol;
+    std::vector<float> voiceChannelCount;
+    std::vector<std::vector<std::vector<float>>> voiceChannelVol;
     std::vector<float> noLoopFade;
 
     std::vector<std::vector<float>> accumulation;
@@ -98,7 +86,7 @@ typedef struct SampleCompute
     std::vector<float> currEnvelopeVol;
     std::vector<float> nextEnvelopeVol;
     int lfoCount;
-    int samplesPerDispatch;
+    unsigned int samplesPerDispatch;
 } SampleCompute;
 
 typedef struct ThreadData{
@@ -108,14 +96,15 @@ typedef struct ThreadData{
 } ThreadData;
 
 // Internal "private" functions
-void Init(int polyphony, int maxSamplesPerDispatch, int lfoCount, int envLenPerPatch);
-void InitAudio();
+void Init(int polyphony, int samplesPerDispatch, int lfoCount, int envLenPerPatch, int outchannels);
+void InitAudio(int bufferCount);
+void DeInitAudio();
 void SetPitchBend(float bend, int index);
 void UpdateDetune(float detune, int index);
 int GetEnvLenPerPatch();
 int AdvanceEnvelope();
 void ApplyPanning();
-int AppendSample(std::vector<float> npArray);
+int AppendSample(std::vector<float> npArray, int channels);
 void DeleteMem(int startAddr, int endAddr);
 void Run(int threadNo, int numThreads, float *outputBuffer);
 int Strike(int sampleNo, float velocity, float voiceDetune, float *patchEnvelope);

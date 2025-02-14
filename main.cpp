@@ -52,10 +52,6 @@ public:
         // Enable keyboard focus
         setFocusPolicy(Qt::StrongFocus);
 
-        std::cout << "Loading JSON" << std::endl;
-        
-        LoadSoundJSON("Harp.json");
-
         // Initialize MIDI
         try
         {
@@ -106,7 +102,7 @@ protected:
         auto it = keyToNote_.find(event->key());
         if (it != keyToNote_.end())
         {
-            keyboard_->keyPressed(it->second);
+            keyboard_->showKeyDepressed(it->second);
             std::vector<unsigned char> message = {0x90, static_cast<unsigned char>(it->second), 127}; // Note on, note, velocity 127
             ProcessMidi(&message);
         }
@@ -121,7 +117,7 @@ protected:
         if (it != keyToNote_.end())
         {
             Release(event->key(), nullptr);
-            keyboard_->keyReleased(it->second);
+            keyboard_->showKeyReleased(it->second);
         }
     }
 
@@ -171,8 +167,10 @@ int main(int argc, char *argv[])
     }
 
     QApplication app(argc, argv);
-    Init(128, 128, 16, 2056);
-    InitAudio();
+    //Init(128, 128, 16, 512, 2);
+    Init(128, 512, 16, 512, 2);
+    LoadSoundJSON("Harp.json");
+    InitAudio(20);
     
     std::cout << "Creating window" << std::endl;
     // Create and show the window
@@ -182,4 +180,5 @@ int main(int argc, char *argv[])
     std::cout << "Run the application" << std::endl;
     // Run the application
     int result = app.exec();
+    DeInitAudio();
 }

@@ -2,6 +2,7 @@
 
 #include "sample_compute.hpp"
 #include <rtaudio/RtAudio.h>
+#include <algorithm>
 
 #define DR_WAV_IMPLEMENTATION
 #include <dr_wav.h>
@@ -11,9 +12,6 @@
 const double PI = 3.14159265358979323846;
 const int SAMPLE_RATE = 44100;
 // Buffer size of 64 frames @ 44100Hz = ~1.45ms latency
-const int NUM_CHANNELS = 1;
-
-unsigned int FRAMES_PER_BUFFER = 64;
 
 int audioCallback(void *outputBuffer, void * /*inputBuffer*/, unsigned int nBufferFrames,
                   double /*streamTime*/, RtAudioStreamStatus /*status*/, void *userData);
@@ -30,7 +28,8 @@ std::vector<int> sampleLoopLength;
 std::vector<int> sampleLoopEnd;
 std::vector<float> voiceStrikeVolume;
 std::vector<std::vector<float>> patchEnvelope; // Nested vector for envelopes
-std::vector<std::vector<float>> sampleChannelVol;
+std::vector<std::vector<std::vector<float>>> sampleChannelVol;
+std::vector<float> sampleChannelCount;
 
 int strikeIndex = 0;
 
@@ -38,7 +37,7 @@ void *threadFunction(void *threadArg)
 {
     ThreadData *data = (ThreadData *)threadArg;
 
-    float outputBuffer[MAX_SAMPLES_PER_DISPATCH];
+    float outputBuffer[self.samplesPerDispatch];
     Run(data->threadNo, data->threadCount, outputBuffer);
     pthread_exit(NULL);
 }
@@ -48,7 +47,7 @@ void *threadFunction(void *threadArg)
 #include <mutex>
 #include "dr_wav.h"
 
-void WriteVectorToWav(std::vector<float> outvector, const std::string &filename)
+void WriteVectorToWav(std::vector<float> outvector, const std::string &filename, int channels)
 {
     if (outvector.empty())
     {
@@ -60,7 +59,7 @@ void WriteVectorToWav(std::vector<float> outvector, const std::string &filename)
     drwav_data_format format;
     format.container = drwav_container_riff;
     format.format = DR_WAVE_FORMAT_IEEE_FLOAT; // 32-bit float PCM
-    format.channels = NUM_CHANNELS;            // Mono or stereo
+    format.channels = channels;                // Channel Count
     format.sampleRate = SAMPLE_RATE;           // Sample rate
     format.bitsPerSample = 32;                 // 32-bit float
 
@@ -73,7 +72,7 @@ void WriteVectorToWav(std::vector<float> outvector, const std::string &filename)
     }
 
     // Write binaryBlob as PCM frames
-    drwav_uint64 framesWritten = drwav_write_pcm_frames(&wav, outvector.size(), outvector.data());
+    drwav_uint64 framesWritten = drwav_write_pcm_frames(&wav, outvector.size()/channels, outvector.data());
     drwav_uninit(&wav);
 
     if (framesWritten == 0)
@@ -120,7 +119,29 @@ void RunMultithread(int numThreads = 1)
 
 RtAudio dac(RtAudio::LINUX_PULSE);
 
-void InitAudio()
+void DeInitAudio()
+{
+    if (dac.isStreamOpen())
+    {
+        try
+        {
+            if (dac.isStreamRunning())
+            {
+                std::cout << "Stopping audio stream" << std::endl;
+                dac.stopStream();
+            }
+
+            std::cout << "Closing audio stream" << std::endl;
+            dac.closeStream();
+        }
+        catch (RtAudioErrorType &e)
+        {
+            std::cerr << "Error while closing audio: " << e << std::endl;
+        }
+    }
+}
+
+void InitAudio(int buffercount)
 {
     // Set up RTMIDI
     unsigned int devices = dac.getDeviceCount();
@@ -148,7 +169,7 @@ void InitAudio()
     // Set output parameters
     RtAudio::StreamParameters parameters;
     parameters.deviceId = dac.getDefaultOutputDevice();
-    parameters.nChannels = NUM_CHANNELS;
+    parameters.nChannels = self.outchannels;
     parameters.firstChannel = 0;
 
     std::cout << "Opening output stream" << std::endl;
@@ -156,11 +177,11 @@ void InitAudio()
     try
     {
         RtAudio::StreamOptions options;
-        options.numberOfBuffers = 2;              // Minimum number of buffers for stable playback
-        options.flags = RTAUDIO_MINIMIZE_LATENCY; // Request minimum latency
+        options.numberOfBuffers = buffercount; // Minimum number of buffers for stable playback
+        // options.flags = RTAUDIO_MINIMIZE_LATENCY; // Request minimum latency
 
         dac.openStream(&parameters, nullptr, RTAUDIO_FLOAT32,
-                       SAMPLE_RATE, &FRAMES_PER_BUFFER, &audioCallback,
+                       SAMPLE_RATE, &self.samplesPerDispatch, &audioCallback,
                        nullptr, &options);
         dac.startStream();
     }
@@ -173,13 +194,15 @@ void InitAudio()
 
 #define MIDI_KEY_COUNT 128
 
-void Init(int polyphony, int samplesPerDispatch, int lfoCount, int envLenPerPatch)
+void Init(int polyphony, int samplesPerDispatch, int lfoCount, int envLenPerPatch, int outchannels)
 {
+    self.outchannels = outchannels;
     self.samplesPerDispatch = samplesPerDispatch;
+    self.envLenPerPatch = envLenPerPatch;
     self.polyphony = polyphony;
-    self.rhodesEffectOn = 0;
+    self.rhodesEffectOn = false;
     self.loop = 0;
-    self.OVERVOLUME = 1.0 / (1<<3);
+    self.OVERVOLUME = 1.0 / (1 << 3);
     self.binaryBlob.clear(); // Initialize empty vector
 
     self.polyphony = polyphony;
@@ -202,7 +225,7 @@ void Init(int polyphony, int samplesPerDispatch, int lfoCount, int envLenPerPatc
     self.envelopeEnd.resize(polyphony, 0.0f);
     for (int voiceNo = 0; voiceNo < self.polyphony; voiceNo++)
     {
-        self.envelopeEnd[voiceNo] = (voiceNo + 1) * ENVELOPE_LENGTH - 1;
+        self.envelopeEnd[voiceNo] = (voiceNo + 1) * self.envLenPerPatch - 1;
     }
 
     self.key2sampleIndex.resize(MIDI_KEY_COUNT);
@@ -219,7 +242,8 @@ void Init(int polyphony, int samplesPerDispatch, int lfoCount, int envLenPerPatc
     self.voiceLen.resize(polyphony, 0.0f);
     self.voiceEnd.resize(polyphony, 0.0f);
     self.voiceDetune.resize(polyphony, 0.0f);
-    self.voiceChannelVol.resize(polyphony, std::vector<float>(self.outchannels, 1.0f));
+    self.voiceChannelCount.resize(polyphony, 0.0f);
+    self.voiceChannelVol.resize(polyphony);
     self.noLoopFade.resize(polyphony, 0.0f);
 
     self.pitchBend.resize(polyphony, 0.0f);
@@ -231,7 +255,7 @@ void Init(int polyphony, int samplesPerDispatch, int lfoCount, int envLenPerPatc
     self.combinedEnvelope.resize(polyphony * envLenPerPatch, 0.0f);
     self.velocityVol.resize(polyphony, 0.0f);
     self.indexInEnvelope.resize(polyphony, 0.0f);
-    
+
     self.currEnvelopeVol.resize(polyphony, 0.0f);
     self.nextEnvelopeVol.resize(polyphony, 0.0f);
 }
@@ -270,14 +294,13 @@ void UpdateDetune(float detune, int index)
 // Function to get the envelope length per patch
 int GetEnvLenPerPatch()
 {
-    return ENVELOPE_LENGTH;
+    return self.envLenPerPatch;
 }
 
 // Function to append data to the binaryBlob array
-int AppendSample(std::vector<float> sample_array)
+int AppendSample(std::vector<float> sample_array, int channels)
 {
     // Transform patchSampleNo to sampleIndex
-    // As some samples are 2 channels (or more!) wide
     for (const auto &keyAction : self.key2samples)
     {
         for (const auto &entry : keyAction) // Iterate over all elements in the mapping
@@ -296,17 +319,33 @@ int AppendSample(std::vector<float> sample_array)
 
     // Get the current size as the starting point for this sample
     std::lock_guard<std::mutex> lock(self.blobMutex);
+    // Store sample start time before inserting data
     int sample_start = self.binaryBlob.size();
 
     // Append the new samples to the vector
     self.binaryBlob.insert(self.binaryBlob.end(), sample_array.begin(), sample_array.end());
 
+    // Find the maximum absolute sample
+    auto max_it = std::max_element(sample_array.begin(), sample_array.end(),
+                                   [](float a, float b)
+                                   { return std::abs(a) < std::abs(b); });
+
+    float maxSample = (max_it != sample_array.end()) ? std::abs(*max_it) : 0.0f;
+
+    // Increment the start time to ensure no silence at the beginning
+    int i = 0;
+    while (i < sample_array.size() && std::abs(sample_array[i++]) < maxSample / 100.0f)
+        ;
+    i -= i % 2;
+    std::cout << "First non-silent sample index: " << i << std::endl;
+    sample_start += i;
+
     // If binaryBlob is empty, write this sample to a WAV file using dr_wav
-    /*if (self.binaryBlob.empty())
+    if (!sample_start)
     {
-        WriteVectorToWav(self.binaryBlob, "binaryBlob.wav");
-        WriteVectorToWav(sample_array, "sample.wav");
-    }*/
+        WriteVectorToWav(self.binaryBlob, "binaryBlob.wav", channels);
+        WriteVectorToWav(sample_array, "sample.wav", channels);
+    }
 
     // Store the Sample Details
     sampleStartPhase.push_back(sample_start);
@@ -354,13 +393,13 @@ void Run(int threadNo, int numThreads, float *outputBuffer)
         }
     }
 
-
     // if rhodes effect is on, sweep the sound from left to right
     float volRight;
     float depth = 0.4f;
-    for (int channel = 0; channel < self.outchannels; channel++){
+    for (int channel = 0; channel < self.outchannels; channel++)
+    {
         if (self.rhodesEffectOn)
-            self.rhodesEffect[channel] = ((1 - depth) + sinf(2 * M_PI * fmodf(self.lfoPhase[0] + 1.0/self.outchannels, 1.0f)) * depth);
+            self.rhodesEffect[channel] = ((1 - depth) + sinf(2 * M_PI * fmodf(self.lfoPhase[0] + 1.0 / self.outchannels, 1.0f)) * depth);
         else
             self.rhodesEffect[channel] = 1;
     }
@@ -370,6 +409,8 @@ void Run(int threadNo, int numThreads, float *outputBuffer)
     // Process each voice
     for (int voiceNo = voiceStart; voiceNo < voiceEnd; voiceNo++)
     {
+
+        // std::cout << " VoiceNo " << voiceNo << " Voice Detune " << self.voiceDetune[voiceNo] << std::endl;
 
         float thisEnvelopeVol = self.combinedEnvelope[(int)(self.indexInEnvelope[voiceNo])] * self.releaseVol[voiceNo] * self.velocityVol[voiceNo];
 
@@ -385,9 +426,7 @@ void Run(int threadNo, int numThreads, float *outputBuffer)
         // Process each sample within the dispatch
         for (int sampleNo = 0; sampleNo < self.samplesPerDispatch; sampleNo++)
         {
-            /*std::cout << "   Sample " << sampleNo << std::endl;
-            std::cout << "   Voice Detune " << self.voiceDetune[voiceNo] << std::endl;
-            std::cout << "   portamento " << self.portamento[voiceNo] << std::endl;*/
+            /*std::cout << "   Sample " << sampleNo << std::endl;*/
 
             // Update portamento for each voice, and for each sample
             self.portamento[voiceNo] = self.portamentoTarget[voiceNo] * self.portamentoAlpha[voiceNo] + (1.0f - self.portamentoAlpha[voiceNo]) * self.portamento[voiceNo];
@@ -398,7 +437,7 @@ void Run(int threadNo, int numThreads, float *outputBuffer)
             float multiplier = difference * normalizedPosition + thisEnvelopeVol;
 
             // Clip the phase to valid sample indices and loop if necessary
-            if (self.dispatchPhase[voiceNo] >= self.voiceEnd[voiceNo])
+            if (self.dispatchPhase[voiceNo] * self.voiceChannelCount[voiceNo] >= self.voiceEnd[voiceNo])
             {
                 if (self.loop)
                 {
@@ -410,29 +449,36 @@ void Run(int threadNo, int numThreads, float *outputBuffer)
                 }
             }
 
-            // Calculate floor and ceiling indices for interpolation
-            int floorIndex = (int)floorf(self.dispatchPhase[voiceNo]);
-            int ceilIndex = floorIndex + 1;
-            if (ceilIndex >= self.voiceEnd[voiceNo])
-            {
-                ceilIndex = self.loop ? self.voiceLoopStart[voiceNo] : self.voiceEnd[voiceNo] - 1;
-            }
-
-            // Ensure indices are within bounds
-            floorIndex = floorIndex < self.binaryBlob.size() ? floorIndex : self.binaryBlob.size() - 1;
-            ceilIndex = ceilIndex < self.binaryBlob.size() ? ceilIndex : self.binaryBlob.size() - 1;
-
-            // Perform linear interpolation between the two samples
-            float fraction = self.dispatchPhase[voiceNo] - floorIndex;
             std::lock_guard<std::mutex> lock(self.blobMutex);
-            floorIndex = std::min(floorIndex, static_cast<int>(self.binaryBlob.size() - 1));
-            ceilIndex = std::min(ceilIndex, static_cast<int>(self.binaryBlob.size() - 1));
-            thisSample = self.binaryBlob[floorIndex];
-            nextSample = self.binaryBlob[ceilIndex];
-
-            for (int channel = 0; channel < self.outchannels; channel++)
+            for (int inchannel = 0; inchannel < self.voiceChannelCount[voiceNo]; inchannel++)
             {
-                self.samples[channel][voiceNo][sampleNo] = (thisSample * (1.0f - fraction) + nextSample * fraction) * self.OVERVOLUME * self.voiceChannelVol[voiceNo][channel] * self.rhodesEffect[channel];
+                for (int outchannel = 0; outchannel < self.outchannels; outchannel++)
+                {
+
+                    // Calculate floor and ceiling indices for interpolation
+                    int floorIndex = (int)floorf(self.dispatchPhase[voiceNo]) * self.voiceChannelCount[voiceNo] + inchannel;
+                    int ceilIndex = floorIndex + self.voiceChannelCount[voiceNo];
+                    if (ceilIndex >= self.voiceEnd[voiceNo])
+                    {
+                        ceilIndex = self.loop ? self.voiceLoopStart[voiceNo] : self.voiceEnd[voiceNo] - 1;
+                    }
+                    // Ensure indices are within bounds
+                    floorIndex = floorIndex < self.binaryBlob.size() ? floorIndex : self.binaryBlob.size() - 1;
+                    ceilIndex = ceilIndex < self.binaryBlob.size() ? ceilIndex : self.binaryBlob.size() - 1;
+
+                    // Perform linear interpolation between the two samples
+                    float fraction = self.dispatchPhase[voiceNo] - floorIndex;
+                    floorIndex = std::min(floorIndex, static_cast<int>(self.binaryBlob.size() - 1));
+                    ceilIndex = std::min(ceilIndex, static_cast<int>(self.binaryBlob.size() - 1));
+                    thisSample = self.binaryBlob[floorIndex];
+                    nextSample = self.binaryBlob[ceilIndex];
+
+                    self.samples[outchannel][voiceNo][sampleNo] =
+                        (thisSample * (1.0f - fraction) + nextSample * fraction) * // Interpolation
+                        self.OVERVOLUME *                                          // Overall volume scaling
+                        self.voiceChannelVol[voiceNo][inchannel][outchannel] *     // Voice-channel volume
+                        self.rhodesEffect[outchannel];                             // Rhodes effect per output channel
+                }
             }
             // Apply fade out if needed
             if (0)
@@ -466,7 +512,8 @@ void Run(int threadNo, int numThreads, float *outputBuffer)
     {
         for (int voiceNo = 0; voiceNo < self.polyphony; voiceNo++)
         {
-            for (int channel = 0; channel < self.outchannels; channel++){
+            for (int channel = 0; channel < self.outchannels; channel++)
+            {
                 float thisSample = self.samples[channel][voiceNo][sampleNo];
                 outputBuffer[sampleNo * 2 + channel] += thisSample;
             }
@@ -493,9 +540,9 @@ int Strike(int sampleNo, float velocity, float voiceDetune, float *patchEnvelope
     // If no patch envelope is supplied, all 1
     if (patchEnvelope == nullptr)
     {
-        for (int envIndex = 0; envIndex < ENVELOPE_LENGTH; envIndex++)
+        for (int envIndex = 0; envIndex < self.envLenPerPatch; envIndex++)
         {
-            int envelopeIndex = strikeIndex * ENVELOPE_LENGTH + envIndex;
+            int envelopeIndex = strikeIndex * self.envLenPerPatch + envIndex;
             self.combinedEnvelope[envelopeIndex] = 1;
         }
     }
@@ -503,9 +550,9 @@ int Strike(int sampleNo, float velocity, float voiceDetune, float *patchEnvelope
     else
     {
         // Assuming 'envLenPerPatch' is the length of 'patchEnvelope'
-        for (int envIndex = 0; envIndex < ENVELOPE_LENGTH; envIndex++)
+        for (int envIndex = 0; envIndex < self.envLenPerPatch; envIndex++)
         {
-            int envelopeIndex = strikeIndex * ENVELOPE_LENGTH + envIndex;
+            int envelopeIndex = strikeIndex * self.envLenPerPatch + envIndex;
             self.combinedEnvelope[envelopeIndex] = patchEnvelope[envIndex];
         }
     }
@@ -513,9 +560,12 @@ int Strike(int sampleNo, float velocity, float voiceDetune, float *patchEnvelope
     // set additional voice init params
     self.releaseVol[strikeIndex] = 1;
     self.velocityVol[strikeIndex] = velocity / 255.0;
-    self.indexInEnvelope[strikeIndex] = strikeIndex * ENVELOPE_LENGTH;
+    self.indexInEnvelope[strikeIndex] = strikeIndex * self.envLenPerPatch;
     self.voiceDetune[strikeIndex] = voiceDetune;
+    std::cout << "Striking voice " << strikeIndex << " with detune " << self.voiceDetune[strikeIndex] << std::endl;
+
     self.voiceChannelVol[strikeIndex] = sampleChannelVol[sampleNo];
+    self.voiceChannelCount[strikeIndex] = sampleChannelCount[sampleNo];
 
     self.portamento[strikeIndex] = 1;
     self.portamentoAlpha[strikeIndex] = 1;
@@ -530,17 +580,31 @@ void Release(int voiceIndex, float *env)
 {
     self.releaseVol[voiceIndex] = self.combinedEnvelope[(int)(self.indexInEnvelope[voiceIndex])];
 
-    for (int envPosition = 0; envPosition < ENVELOPE_LENGTH; envPosition++)
+    // If no patch envelope is supplied, all 1
+    if (env == nullptr)
     {
-        int index = voiceIndex * ENVELOPE_LENGTH + envPosition;
-        self.combinedEnvelope[voiceIndex] = env[envPosition] * self.releaseVol[voiceIndex];
+        for (int envIndex = 0; envIndex < self.envLenPerPatch; envIndex++)
+        {
+            int envelopeIndex = strikeIndex * self.envLenPerPatch + envIndex;
+            self.combinedEnvelope[envelopeIndex] = 1;
+        }
     }
-    self.indexInEnvelope[voiceIndex] = voiceIndex * ENVELOPE_LENGTH;
+    // Otherwise, load the patch env
+    else
+    {
+        for (int envPosition = 0; envPosition < self.envLenPerPatch; envPosition++)
+        {
+            int index = voiceIndex * self.envLenPerPatch + envPosition;
+            self.combinedEnvelope[index] = env[envPosition] * self.releaseVol[voiceIndex];
+        }
+    }
+    // Reset the env to the beginning
+    self.indexInEnvelope[voiceIndex] = voiceIndex * self.envLenPerPatch;
 }
 
 void HardStop(int strikeIndex)
 {
-    self.indexInEnvelope[strikeIndex] = strikeIndex * ENVELOPE_LENGTH;
+    self.indexInEnvelope[strikeIndex] = strikeIndex * self.envLenPerPatch;
     self.releaseVol[strikeIndex] = 1.0f;
     self.velocityVol[strikeIndex] = 0.0f;
 }
@@ -640,11 +704,13 @@ void SelfDestruct()
 int LoadRestAudioB64(const json &sample)
 {
     // Create result structure
-    SampleData result;
+    std::vector<float> samples;
+    int sampleRate;
+    int inchannels;
 
     // Decode Base64 to binary
     // Preallocate the binary buffer based on base64 string length
-    const std::string& base64Data = sample["audioData"].get<std::string>();
+    const std::string &base64Data = sample["audioData"].get<std::string>();
     std::string binaryData;
     binaryData.reserve((base64Data.length() * 3) / 4); // Approximate size
     binaryData = base64_decode(base64Data);
@@ -653,10 +719,10 @@ int LoadRestAudioB64(const json &sample)
         drwav wav;
         if (drwav_init_memory(&wav, binaryData.data(), binaryData.size(), nullptr))
         {
-            result.samples.resize(wav.totalPCMFrameCount * wav.channels);
-            drwav_read_pcm_frames_f32(&wav, wav.totalPCMFrameCount, result.samples.data());
-            result.sampleRate = wav.sampleRate;
-            result.channels = wav.channels;
+            samples.resize(wav.totalPCMFrameCount * wav.channels);
+            drwav_read_pcm_frames_f32(&wav, wav.totalPCMFrameCount, samples.data());
+            sampleRate = wav.sampleRate;
+            inchannels = wav.channels;
             drwav_uninit(&wav);
         }
     }
@@ -666,10 +732,10 @@ int LoadRestAudioB64(const json &sample)
         if (drmp3_init_memory(&mp3, binaryData.data(), binaryData.size(), nullptr))
         {
             drmp3_uint64 frameCount = drmp3_get_pcm_frame_count(&mp3);
-            result.samples.resize(frameCount * mp3.channels);
-            drmp3_read_pcm_frames_f32(&mp3, frameCount, result.samples.data());
-            result.sampleRate = mp3.sampleRate;
-            result.channels = mp3.channels;
+            samples.resize(frameCount * mp3.channels);
+            drmp3_read_pcm_frames_f32(&mp3, frameCount, samples.data());
+            sampleRate = mp3.sampleRate;
+            inchannels = mp3.channels;
             drmp3_uninit(&mp3);
         }
     }
@@ -680,63 +746,57 @@ int LoadRestAudioB64(const json &sample)
     }
 
     // Number of frames (samples per channel)
-    size_t frameCount = result.samples.size() / result.channels;
+    size_t frameCount = samples.size() / inchannels;
 
-    // Separate buffers for each channel
-    std::vector<std::vector<float>> channelBuffers(result.channels, std::vector<float>(frameCount));
+    // Determine the mapping of input channels to output channels
+    // For example if the input is Mono, it should distribute even power to both sides
+    // the same amound of power that the left channel of a stereo signal puts out on one
+    // 2D vector to store gains: gains[inchannel][outchannel]
+    std::vector<std::vector<float>> gains(inchannels, std::vector<float>(self.outchannels, 0.0f));
 
-    // Deinterleave the samples
-    for (size_t i = 0; i < result.samples.size(); i++) {
-        const size_t frame = i / result.channels;
-        const int channel = i % result.channels;
-        channelBuffers[channel][frame] = result.samples[i];
-    }
+    for (size_t inchannel = 0; inchannel < inchannels; inchannel++)
+    {
+        // Calculate the angle of the current input channel
+        float inChannelAngle = inchannels * M_PI / 2 + inchannel * 2.0f * M_PI / inchannels;
 
-    // Determine panning based on channel count. radially distribute the output channels 
-    std::vector<float> channelAngles;
-    for(int channel = 0; channel < self.outchannels; channel++){
-        channelAngles.push_back(channel * M_PI);
-    }
+        float totalPower = 0.0f;
 
-    // Set the user position to 0degrees
-    float sourceAngle = M_PI/2;
-    std::vector<float> gains(channelAngles.size());
-    float totalPower = 0.0f;
+        for (size_t outchannel = 0; outchannel < self.outchannels; outchannel++)
+        {
+            // Calculate the angle of the current output channel
+            float outChannelAngle = self.outchannels * M_PI / 2 + outchannel * 2.0f * M_PI / self.outchannels;
 
-    // Calculate initial gains based on angular distance
-    for (size_t i = 0; i < self.outchannels; i++) {
-        // Calculate angular distance between source and this channel
-        float angleDiff = std::abs(sourceAngle - channelAngles[i]);
-        
-        // Wrap around for circular continuity
-        if (angleDiff > M_PI) {
-            angleDiff = 2.0f * M_PI - angleDiff;
+            // Calculate angular distance between input and output channels
+            float angleDiff = fmodf(std::abs(inChannelAngle - outChannelAngle), 2 * M_PI);
+            if (angleDiff > M_PI)
+            {
+                angleDiff = M_PI - angleDiff;
+            }
+            // Convert angular distance to unity gain.
+            float gain = angleDiff / M_PI;
+            gain = std::abs(gain);
+
+            // Store the gain for this input-output channel pair
+            gains[inchannel][outchannel] = gain;
+            totalPower += gain * gain;
         }
 
-        // Convert angular distance to gain using cosine function
-        gains[i] = std::cos(angleDiff / 2.0f);
-        gains[i] = std::max(0.0f, gains[i]); // Eliminate negative gains
-        
-        totalPower += gains[i] * gains[i];
+        // Normalize for constant power
+        float normalizationFactor = 1.0f / std::sqrt(totalPower);
+        for (size_t outchannel = 0; outchannel < self.outchannels; outchannel++)
+        {
+            gains[inchannel][outchannel] *= normalizationFactor;
+        }
     }
-
-    // Normalize for constant power
-    float normalizationFactor = 1.0f / std::sqrt(totalPower);
-    for (float& gain : gains) {
-        gain *= normalizationFactor;
-    }
-    std::cout << "Gains " << gains[0] << ", " << gains[1] << std::endl;
+    // std::cout << gains[0][0] << " " << gains[0][1] << std::endl;
     sampleChannelVol.push_back(gains); // Add a specific array of 3 elements
-    // Append each channel separately
-    for (int i = 0; i < result.channels; i++)
-    {
-        AppendSample(channelBuffers[i]);
-    }
+    sampleChannelCount.push_back(inchannels);
+
+    AppendSample(samples, inchannels);
     currPatchSampleNo++;
 
     return 0;
 }
-
 
 // Load samples from JSON file
 void LoadSoundJSON(const std::string &filename)
@@ -749,7 +809,7 @@ void LoadSoundJSON(const std::string &filename)
 
     std::vector<char> buffer(size);
     f.read(buffer.data(), size);
-    
+
     json data = json::parse(buffer.begin(), buffer.end());
 
     int patchNoInFile = 0;
@@ -765,22 +825,25 @@ void LoadSoundJSON(const std::string &filename)
     }
 
     std::cout << "Finished loading key mappings" << std::endl;
+    std::cout << "Binary Blob size " << self.binaryBlob.size() << std::endl;
 }
 
 void ProcessMidi(std::vector<unsigned char> *message)
 {
-    unsigned char status = message->at(0);
-    unsigned char midi_key = message->at(1);
-    unsigned char velocity = message->at(2);
+    unsigned int status = message->at(0);
+    unsigned int midi_key = message->at(1);
+    float velocity = int(message->at(2)) / 127.0;
+    std::cout << "status " << status << " midi key " << midi_key << " velocity " << velocity << std::endl;
 
     // Note On
     if ((status & 0xF0) == 0x90 && velocity > 0)
     {
         const auto &sampleIndex = self.key2sampleIndex[midi_key];
         const auto &sampleDetune = self.key2sampleDetune[midi_key];
-        std::cout << "Sample Index" << sampleIndex[0] << ", " << sampleDetune.size() << std::endl;
+        std::cout << "Sample Index: " << sampleIndex[0] << ", " << sampleDetune.size() << std::endl;
         for (size_t i = 0; i < sampleIndex.size() && i < sampleDetune.size(); i++)
         {
+            std::cout << " sample Detune " << sampleDetune[i] << std::endl;
             self.key2voiceIndex[midi_key].push_back(Strike(sampleIndex[i], velocity, sampleDetune[i], nullptr));
         }
     }
@@ -810,10 +873,9 @@ int audioCallback(void *outputBuffer, void * /*inputBuffer*/, unsigned int nBuff
 void Test()
 {
     std::cout << "Test mode activated" << std::endl;
-    std::cout << "Initializing with 4 polyphony" << std::endl;
 
-    int samples_per_dispatch = FRAMES_PER_BUFFER;
-    Init(2, samples_per_dispatch, 2, 512);
+    int samples_per_dispatch = 128;
+    Init(10, samples_per_dispatch, 2, 512, 2);
     std::cout << "Loading JSON" << std::endl;
     LoadSoundJSON("Harp.json");
     DumpSampleInfo("sample_info.json"); // Only dump first buffer for debugging
@@ -821,55 +883,39 @@ void Test()
     std::cout << "Loaded patch" << std::endl;
     std::cout << "Processing MIDI" << std::endl;
 
-    std::vector<unsigned char> message = {0x90, 45, 127}; // Note on, middle A, velocity 127
-    ProcessMidi(&message);
-    std::cout << "Processed MIDI" << std::endl;
+    unsigned char penta[] = {
+        48, 50, 52, 55, 57};
     std::cout << "Running engine" << std::endl;
 
     // Calculate buffer sizes for 10 seconds of stereo audio
-    const int secondsToGenerate = 5;
+    const int secondsToGenerate = 10;
     const int samplesPerChannel = SAMPLE_RATE * secondsToGenerate;
     const int totalSamples = samplesPerChannel * 2; // Stereo output
 
     // Allocate buffer with proper size for stereo output
-    float *buffer = new float[totalSamples]();
+    std::vector<float> buffer(totalSamples);
 
-    // Generate audio in chunks of FRAMES_PER_BUFFER
+    // Generate audio in chunks of samples_per_dispatch
     const int numBuffers = samplesPerChannel / samples_per_dispatch;
-    float *currentBufferPos = buffer;
 
     for (int i = 0; i < numBuffers; i++)
     {
-        Run(0, 1, currentBufferPos);
-        currentBufferPos += samples_per_dispatch * 2; // Move pointer by frames * channels
+        // Compute the starting index in the buffer vector
+        int startIndex = i * samples_per_dispatch * self.outchannels;
+        Run(0, 1, buffer.data() + startIndex);
 
+        // Send a MIDI note every 100 iterations
+        if (i % 100 == 0)
+        {
+            std::vector<unsigned char> message = {0x90, penta[(i / 100) % 5], 127}; // Note on
+            ProcessMidi(&message);
+        }
+
+        // Dump first buffer for debugging
         if (i == 0)
         {
-            Dump("dump.json"); // Only dump first buffer for debugging
+            Dump("dump.json");
         }
     }
-
-    std::cout << "Generated Buffer" << std::endl;
-    std::cout << "Writing Buffer to file" << std::endl;
-
-    // Write output to WAV file
-    drwav_data_format format;
-    format.container = drwav_container_riff;
-    format.format = DR_WAVE_FORMAT_IEEE_FLOAT;
-    format.channels = 2; // Stereo output
-    format.sampleRate = SAMPLE_RATE;
-    format.bitsPerSample = 32;
-
-    drwav wav;
-    if (drwav_init_file_write(&wav, "Outfile.wav", &format, nullptr))
-    {
-        drwav_write_pcm_frames(&wav, samplesPerChannel, buffer);
-        drwav_uninit(&wav);
-        std::cout << "Wrote output to Outfile.wav" << std::endl;
-    }
-    else
-    {
-        std::cerr << "Failed to write WAV file" << std::endl;
-    }
-    delete[] buffer;
+    WriteVectorToWav(buffer, "Outfile.wav", self.outchannels);
 }

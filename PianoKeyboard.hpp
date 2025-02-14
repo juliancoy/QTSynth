@@ -108,6 +108,16 @@ public:
         midiOut.reset(); // Ensure MIDI output is properly closed
     }
 
+    void showKeyDepressed(int note)
+    {
+        auto it = keys_.find(note);
+        if (it != keys_.end())
+        {
+            it->second->setPressed(true);
+            activeKey_ = it->second;
+        }
+    }
+
     void keyPressed(int note)
     {
         auto it = keys_.find(note);
@@ -128,6 +138,19 @@ public:
         {
             std::vector<unsigned char> message = {0x80, static_cast<unsigned char>(it->first), 127}; // Note off, note, velocity 127
             ProcessMidi(&message);
+            it->second->setPressed(false);
+            if (activeKey_ == it->second)
+            {
+                activeKey_ = nullptr;
+            }
+        }
+    }
+
+    void showKeyReleased(int note)
+    {
+        auto it = keys_.find(note);
+        if (it != keys_.end())
+        {
             it->second->setPressed(false);
             if (activeKey_ == it->second)
             {
