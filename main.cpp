@@ -116,7 +116,8 @@ protected:
         auto it = keyToNote_.find(event->key());
         if (it != keyToNote_.end())
         {
-            Release(event->key(), nullptr);
+            std::vector<unsigned char> message = {0x80, static_cast<unsigned char>(it->second), 0}; // Note off
+            ProcessMidi(&message);
             keyboard_->showKeyReleased(it->second);
         }
     }
@@ -167,10 +168,10 @@ int main(int argc, char *argv[])
     }
 
     QApplication app(argc, argv);
-    //Init(128, 128, 16, 512, 2);
-    Init(128, 512, 16, 512, 2);
+    Init(64, 128, 16, 512, 2, 2);
+    //Init(32, 512*4, 16, 512, 2, 2);
     LoadSoundJSON("Harp.json");
-    InitAudio(20);
+    InitAudio(4);
     
     std::cout << "Creating window" << std::endl;
     // Create and show the window

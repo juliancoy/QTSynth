@@ -28,11 +28,16 @@ using json = nlohmann::json;
 typedef struct SampleCompute
 {
     int polyphony;
+    bool sustainPedalOn = false;
+    float masterVolume = 1;
+    float modulationDepth = 0;
+    float expression = 0;
+    float bendDepth = 2;
 
     std::vector<float> lfoPhase;
     std::vector<float> lfoIncreasePerDispatch;
 
-    std::vector<float> dispatchPhase;
+    std::vector<float> dispatchFrameNo;
     std::vector<float> dispatchPhaseClipped;
 
     std::vector<std::vector<float>> outputPhaseFloor;
@@ -52,8 +57,8 @@ typedef struct SampleCompute
     std::vector<float> voiceLoopEnd;
     std::vector<float> voiceLoopLength;
     std::vector<float> slaveFade;
+    std::vector<float> voiceStart;
     std::vector<float> voiceLen;
-    std::vector<float> voiceEnd;
     std::vector<float> voiceDetune;
     std::vector<float> voiceChannelCount;
     std::vector<std::vector<std::vector<float>>> voiceChannelVol;
@@ -69,7 +74,7 @@ typedef struct SampleCompute
     json key2samples; 
     float OVERVOLUME;
 
-    std::vector<float> pitchBend;
+    std::vector<float> pitchWheel;
     std::vector<float> portamento;
     std::vector<float> portamentoAlpha;
     std::vector<float> portamentoTarget;
@@ -96,7 +101,7 @@ typedef struct ThreadData{
 } ThreadData;
 
 // Internal "private" functions
-void Init(int polyphony, int samplesPerDispatch, int lfoCount, int envLenPerPatch, int outchannels);
+void Init(int polyphony, int samplesPerDispatch, int lfoCount, int envLenPerPatch, int outchannels, float bendDepth);
 void InitAudio(int bufferCount);
 void DeInitAudio();
 void SetPitchBend(float bend, int index);
@@ -107,11 +112,11 @@ void ApplyPanning();
 int AppendSample(std::vector<float> npArray, int channels);
 void DeleteMem(int startAddr, int endAddr);
 void Run(int threadNo, int numThreads, float *outputBuffer);
-int Strike(int sampleNo, float velocity, float voiceDetune, float *patchEnvelope);
+int Strike(int sampleNo, float velocity, float sampleDetune, float *patchEnvelope);
 void HardStop(int voiceIndex);
 void RunMultithread();
 void Dump(const char* filename);
-void Release(int voiceIndex, float *env);
+int Release(int voiceIndex, float *env);
 
 // Public API
 int LoadRestAudioB64(const json &sample);
