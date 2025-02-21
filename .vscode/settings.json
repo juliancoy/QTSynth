@@ -82,5 +82,6 @@
         "valarray": "cpp",
         "variant": "cpp",
         "qwidget": "cpp"
-    }
+    },
+    "makefile.configureOnOpen": false
 }

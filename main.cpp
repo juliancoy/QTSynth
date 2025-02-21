@@ -1,8 +1,9 @@
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QMainWindow>
 #include <QtWidgets/QPushButton>
-#include <QtWidgets/QVBoxLayout>
+#include <QtWidgets/QHBoxLayout>
 #include <QtWidgets/QWidget>
+#include <QtWidgets/QSlider>
 #include <QtGui/QPainter>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QKeyEvent>
@@ -24,14 +25,6 @@ double midiNoteToFreq(int note)
     return 440.0 * std::pow(2.0, (note - 69) / 12.0);
 }
 
-// Print help information
-void printHelp()
-{
-    std::cout << "Qt Sine Synth - Command Line Options:\n"
-              << "  --test       Run in test mode\n"
-              << "  --help, -h   Show this help message\n";
-}
-
 class SynthWindow : public QMainWindow
 {
 public:
@@ -44,10 +37,20 @@ public:
         auto centralWidget = new QWidget(this);
         setCentralWidget(centralWidget);
 
-        auto layout = new QVBoxLayout(centralWidget);
+        auto layout = new QHBoxLayout(centralWidget);
 
         keyboard_ = new PianoKeyboard(this);
         layout->addWidget(keyboard_);
+
+        // Create volume slider
+        volumeSlider_ = new QSlider(Qt::Vertical, this);
+        volumeSlider_->setMinimum(0);
+        volumeSlider_->setMaximum(100);
+        volumeSlider_->setValue(50); // Default volume at 50%
+        volumeSlider_->setTickPosition(QSlider::TicksBothSides);
+        volumeSlider_->setTickInterval(10);
+        connect(volumeSlider_, &QSlider::valueChanged, this, &SynthWindow::onVolumeChanged);
+        layout->addWidget(volumeSlider_);
 
         // Enable keyboard focus
         setFocusPolicy(Qt::StrongFocus);
@@ -144,14 +147,48 @@ private:
         }
     }
 
+    void onVolumeChanged(int value) {
+        float normalizedVolume = value / 100.0f;
+        SetVolume(normalizedVolume);
+    }
+
     PianoKeyboard *keyboard_;
+    QSlider *volumeSlider_;
     std::unique_ptr<RtMidiIn> midiIn_;
     std::vector<std::unique_ptr<RtMidiIn>> midiInputs_;
+    float currentVolume_ = 0.5f; // Track current volume
 };
+
+// Handle command line arguments
+int polyphony = 64;
+int samplesPerDispatch = 128;
+int sampleRate = 44100;
+int lfoCount = 16;
+int envLenPerPatch = 512;
+int outchannels = 2;
+float bendDepth = 2.0f;
+int bufferCount = 4;
+int threadCount = 4;
+
+// Print help information
+void printHelp()
+{
+    std::cout << "Qt Sine Synth - Command Line Options:\n"
+              << "  --test       Run in test mode\n"
+              << "  --help, -h   Show this help message\n"
+              << "  --polyphony <n>     Set polyphony (default: " << polyphony << ")\n"
+              << "  --samples <n>       Set samples per dispatch (default: " << samplesPerDispatch << ")\n"
+              << "  --samplerate <n>    Set samples rate (default: " << sampleRate << ")\n"
+              << "  --lfo <n>           Set LFO count (default: " << lfoCount << ")\n"
+              << "  --env <n>           Set envelope length per patch (default: " << envLenPerPatch << ")\n"
+              << "  --channels <n>      Set output channels (default: " << outchannels << ")\n"
+              << "  --bend <n>          Set pitch bend depth (default: " << bendDepth << ")\n"
+              << "  --buffers <n>       Set audio buffer count (default: " << bufferCount << ")\n";
+}
 
 int main(int argc, char *argv[])
 {
-    // Handle command line arguments
+
     for (int i = 1; i < argc; i++)
     {
         std::string arg = argv[i];
@@ -165,13 +202,30 @@ int main(int argc, char *argv[])
             printHelp();
             return 0;
         }
+        else if (arg == "--polyphony" && i + 1 < argc)
+            polyphony = std::stoi(argv[++i]);
+        else if (arg == "--samples" && i + 1 < argc)
+            samplesPerDispatch = std::stoi(argv[++i]);
+        else if (arg == "--samplerate" && i + 1 < argc)
+            sampleRate = std::stoi(argv[++i]);
+        else if (arg == "--lfo" && i + 1 < argc)
+            lfoCount = std::stoi(argv[++i]);
+        else if (arg == "--env" && i + 1 < argc)
+            envLenPerPatch = std::stoi(argv[++i]);
+        else if (arg == "--channels" && i + 1 < argc)
+            outchannels = std::stoi(argv[++i]);
+        else if (arg == "--bend" && i + 1 < argc)
+            bendDepth = std::stof(argv[++i]);
+        else if (arg == "--buffers" && i + 1 < argc)
+            bufferCount = std::stoi(argv[++i]);
+        else if (arg == "--threadcount" && i + 1 < argc)
+            threadCount = std::stoi(argv[++i]);
     }
 
     QApplication app(argc, argv);
-    Init(64, 128, 16, 512, 2, 2);
-    //Init(32, 512*4, 16, 512, 2, 2);
+    Init(polyphony, samplesPerDispatch, lfoCount, envLenPerPatch, outchannels, bendDepth, sampleRate, threadCount);
     LoadSoundJSON("Harp.json");
-    InitAudio(4);
+    InitAudio(bufferCount);
     
     std::cout << "Creating window" << std::endl;
     // Create and show the window

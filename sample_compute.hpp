@@ -18,7 +18,6 @@ using json = nlohmann::json;
 #define tickTime 1
 #define SAMPLE_SET_COUNT 1
 #define SAMPLE_MAX_TIME_SECONDS 15
-#define SAMPLE_FREQUENCY 44100
 #define SAMPLE_BUFFER_SIZE_SAMPLES 16777216
 #define MIDI_COUNT 128
 #define LOOP 0
@@ -27,9 +26,10 @@ using json = nlohmann::json;
 
 typedef struct SampleCompute
 {
+    int threadCount = 2;
     int polyphony;
+    int sampleRate = 44100; // Default sample rate
     bool sustainPedalOn = false;
-    float masterVolume = 1;
     float modulationDepth = 0;
     float expression = 0;
     float bendDepth = 2;
@@ -58,7 +58,7 @@ typedef struct SampleCompute
     std::vector<float> voiceLoopLength;
     std::vector<float> slaveFade;
     std::vector<float> voiceStart;
-    std::vector<float> voiceLen;
+    std::vector<float> voiceFrameCount;
     std::vector<float> voiceDetune;
     std::vector<float> voiceChannelCount;
     std::vector<std::vector<std::vector<float>>> voiceChannelVol;
@@ -72,7 +72,7 @@ typedef struct SampleCompute
     std::vector<std::vector<int>> key2voiceIndex;
 
     json key2samples; 
-    float OVERVOLUME;
+    float masterVolume;
 
     std::vector<float> pitchWheel;
     std::vector<float> portamento;
@@ -94,14 +94,18 @@ typedef struct SampleCompute
     unsigned int samplesPerDispatch;
 } SampleCompute;
 
-typedef struct ThreadData{
+
+// Extended ThreadData structure to include outputBuffer
+typedef struct ThreadData {
     SampleCompute *sampleCompute;
     int threadCount;
     int threadNo;
+    float *outputBuffer;
 } ThreadData;
 
 // Internal "private" functions
-void Init(int polyphony, int samplesPerDispatch, int lfoCount, int envLenPerPatch, int outchannels, float bendDepth);
+void Init(int polyphony, int samplesPerDispatch, int lfoCount, int envLenPerPatch, int outchannels, float bendDepth, float sampleRate, int threadCount);
+void SetVolume(float newVol);
 void InitAudio(int bufferCount);
 void DeInitAudio();
 void SetPitchBend(float bend, int index);
@@ -111,10 +115,11 @@ int AdvanceEnvelope();
 void ApplyPanning();
 int AppendSample(std::vector<float> npArray, int channels);
 void DeleteMem(int startAddr, int endAddr);
-void Run(int threadNo, int numThreads, float *outputBuffer);
+void ProcessVoices(int threadNo, int numThreads, float *outputBuffer);
+void SumSamples(int threadNo, int numThreads, float *outputBuffer);
 int Strike(int sampleNo, float velocity, float sampleDetune, float *patchEnvelope);
 void HardStop(int voiceIndex);
-void RunMultithread();
+void RunMultithread(int numThreads, float *outputBuffer);
 void Dump(const char* filename);
 int Release(int voiceIndex, float *env);
 
