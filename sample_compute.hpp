@@ -67,11 +67,13 @@ typedef struct SampleCompute
     std::vector<std::vector<float>> accumulation;
     std::vector<std::vector<float>> sampleWithinDispatchPostBend;
 
-    std::vector<std::vector<int>> key2sampleIndex;
-    std::vector<std::vector<float>> key2sampleDetune;
+    std::vector<std::vector<int>> key2sampleIndex12TET;
+    std::vector<std::vector<float>> key2sampleDetune12TET;
+    std::vector<std::vector<int>> key2sampleIndexRast;
+    std::vector<std::vector<float>> key2sampleDetuneRast;
     std::vector<std::vector<int>> key2voiceIndex;
 
-    json key2samples; 
+    json key2samples12tet; 
     float masterVolume;
 
     std::vector<float> pitchWheel;
@@ -122,6 +124,9 @@ void HardStop(int voiceIndex);
 void RunMultithread(int numThreads, float *outputBuffer);
 void Dump(const char* filename);
 int Release(int voiceIndex, float *env);
+void SetTuningSystem(bool useRast);
+
+double midiNoteTo12TETFreq(int note);
 
 // Public API
 int LoadRestAudioB64(const json &sample);

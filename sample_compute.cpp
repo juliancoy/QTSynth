@@ -6,10 +6,23 @@
 #include <string>
 #include <limits>
 
+#include <fstream>
+#include <vector>
+#include <mutex>
+#include "dr_wav.h"
+
+#include "tuning.hpp"
+
 #define DR_WAV_IMPLEMENTATION
 #include <dr_wav.h>
 #define DR_MP3_IMPLEMENTATION
 #include <dr_mp3.h>
+
+#define MIDI_NOTES 128
+#define MIDI_CC_SUSTAIN 64
+#define MIDI_CC_VOLUME 7
+#define MIDI_CC_MODULATION 1
+#define MIDI_CC_EXPRESSION 11
 
 const double PI = 3.14159265358979323846;
 // Buffer size of 64 frames @ 44100Hz = ~1.45ms latency
@@ -20,8 +33,13 @@ int audioCallback(void *outputBuffer, void * /*inputBuffer*/, unsigned int nBuff
 // ThreadData threadData[numThreads];
 SampleCompute self;
 
+// Extensable arrays for each loaded patch
+std::vector<int> patchStartSample;
+std::vector<int> patchSampleCount;
+
 // Extensable arrays for sample state
 std::vector<float> sampleStart;
+std::vector<float> sampleFrequency;
 std::vector<int> sampleFrameCount;
 std::vector<int> sampleLoopStart;
 std::vector<int> sampleLoopLength;
@@ -30,8 +48,7 @@ std::vector<std::vector<std::vector<float>>> sampleChannelVol;
 std::vector<float> sampleChannelCount;
 std::vector<float> voiceStrikeVolume;
 std::vector<std::vector<float>> patchEnvelope; // Nested vector for envelopes
-std::mutex threadVoiceLocks[128]; // Fixed array of locks, one per voice
-
+std::mutex threadVoiceLocks[128];              // Fixed array of locks, one per voice
 
 int strikeIndex = 0;
 
@@ -49,11 +66,6 @@ void *SumSamplesThreadWrapper(void *threadArg)
     pthread_exit(NULL);
 }
 
-#include <fstream>
-#include <vector>
-#include <mutex>
-#include "dr_wav.h"
-
 void WriteVectorToWav(std::vector<float> outvector, const std::string &filename, int channels)
 {
     if (outvector.empty())
@@ -67,7 +79,7 @@ void WriteVectorToWav(std::vector<float> outvector, const std::string &filename,
     format.container = drwav_container_riff;
     format.format = DR_WAVE_FORMAT_IEEE_FLOAT; // 32-bit float PCM
     format.channels = channels;                // Channel Count
-    format.sampleRate = self.sampleRate;           // Sample rate
+    format.sampleRate = self.sampleRate;       // Sample rate
     format.bitsPerSample = 32;                 // 32-bit float
 
     // Initialize WAV file for writing
@@ -107,7 +119,7 @@ void RunMultithread(int numThreads, float *outputBuffer, void *(*threadFunc)(voi
         threadData[t].sampleCompute = &self;
         threadData[t].threadNo = t;
         threadData[t].threadCount = numThreads;
-        threadData[t].outputBuffer = outputBuffer;  // Share the same output buffer across all threads
+        threadData[t].outputBuffer = outputBuffer; // Share the same output buffer across all threads
 
         pthread_attr_t attr;
         pthread_attr_init(&attr);
@@ -116,17 +128,18 @@ void RunMultithread(int numThreads, float *outputBuffer, void *(*threadFunc)(voi
         struct sched_param param;
         param.sched_priority = 80; // High real-time priority (1-99, where 99 is highest)
         pthread_attr_setschedparam(&attr, &param);
-        
+
         rc = pthread_create(&threads[t], &attr, threadFunc, (void *)&threadData[t]);
         if (rc)
         {
             std::cout << "ERROR; return code from pthread_create() is " << rc << std::endl;
-            if (rc == EPERM) {
+            if (rc == EPERM)
+            {
                 std::cout << "Permission denied. Try running with sudo or setting appropriate capabilities." << std::endl;
             }
             exit(-1);
         }
-        
+
         pthread_attr_destroy(&attr);
     }
 
@@ -137,14 +150,18 @@ void RunMultithread(int numThreads, float *outputBuffer, void *(*threadFunc)(voi
     }
 }
 
-static RtAudio* dac = nullptr;
+static RtAudio *dac = nullptr;
 
 void DeInitAudio()
 {
-    if (dac) {
-        try {
-            if (dac->isStreamOpen()) {
-                if (dac->isStreamRunning()) {
+    if (dac)
+    {
+        try
+        {
+            if (dac->isStreamOpen())
+            {
+                if (dac->isStreamRunning())
+                {
                     std::cout << "Stopping audio stream" << std::endl;
                     dac->stopStream();
                 }
@@ -154,7 +171,8 @@ void DeInitAudio()
             delete dac;
             dac = nullptr;
         }
-        catch (RtAudioError &e) {
+        catch (RtAudioError &e)
+        {
             std::cerr << "Error while closing audio: " << e.what() << std::endl;
         }
     }
@@ -163,7 +181,8 @@ void DeInitAudio()
 void InitAudio(int buffercount)
 {
     // Set up RTMIDI
-    if (!dac) {
+    if (!dac)
+    {
         dac = new RtAudio(RtAudio::LINUX_PULSE);
     }
     unsigned int devices = dac->getDeviceCount();
@@ -204,8 +223,8 @@ void InitAudio(int buffercount)
         // options.flags = RTAUDIO_MINIMIZE_LATENCY; // Request minimum latency
 
         dac->openStream(&parameters, nullptr, RTAUDIO_FLOAT32,
-                       self.sampleRate, &self.samplesPerDispatch, &audioCallback,
-                       nullptr, &options);
+                        self.sampleRate, &self.samplesPerDispatch, &audioCallback,
+                        nullptr, &options);
         dac->startStream();
     }
     catch (RtAudioError &e)
@@ -219,7 +238,7 @@ void InitAudio(int buffercount)
 
 void Init(int polyphony, int samplesPerDispatch, int lfoCount, int envLenPerPatch, int outchannels, float bendDepth, float sampleRate, int threadCount)
 {
-    self.threadCount =threadCount;
+    self.threadCount = threadCount;
     self.sampleRate = sampleRate;
     self.bendDepth = bendDepth;
     self.outchannels = outchannels;
@@ -253,8 +272,8 @@ void Init(int polyphony, int samplesPerDispatch, int lfoCount, int envLenPerPatc
         self.envelopeEnd[voiceNo] = (voiceNo + 1) * self.envLenPerPatch - 1;
     }
 
-    self.key2sampleIndex.resize(MIDI_KEY_COUNT);
-    self.key2sampleDetune.resize(MIDI_KEY_COUNT);
+    self.key2sampleIndex12TET.resize(MIDI_KEY_COUNT);
+    self.key2sampleDetune12TET.resize(MIDI_KEY_COUNT);
     self.key2voiceIndex.resize(MIDI_KEY_COUNT);
 
     self.xfadeTracknot.resize(polyphony, 1.0f);
@@ -288,9 +307,11 @@ void Init(int polyphony, int samplesPerDispatch, int lfoCount, int envLenPerPatc
 using json = nlohmann::json;
 
 int currSampleIndex = 0;
-int currPatchSampleNo = 0;
+int currAbsoluteSampleNo = 0;
+int startSample = 0;
 
-void SetVolume(float newVol){
+void SetVolume(float newVol)
+{
     self.masterVolume = newVol;
 }
 
@@ -303,23 +324,6 @@ int GetEnvLenPerPatch()
 // Function to append data to the binaryBlob array
 int AppendSample(std::vector<float> sample_array, int channels)
 {
-    // Transform patchSampleNo to sampleIndex
-    for (const auto &keyAction : self.key2samples)
-    {
-        for (const auto &entry : keyAction) // Iterate over all elements in the mapping
-        {
-            int keyTrigger = entry["keyTrigger"];
-            int patchSampleNo = entry["sampleNo"];
-            float detuneRatio = entry["pitchBend"];
-
-            if (patchSampleNo == currPatchSampleNo)
-            {
-                self.key2sampleIndex[keyTrigger].push_back(currSampleIndex);
-                self.key2sampleDetune[keyTrigger].push_back(detuneRatio);
-            }
-        }
-    }
-
     // Get the current size as the starting point for this sample
     std::lock_guard<std::mutex> lock(self.blobMutex);
     // Store sample start time before inserting data
@@ -352,7 +356,7 @@ int AppendSample(std::vector<float> sample_array, int channels)
 
     // Store the Sample Details
     sampleStart.push_back(sample_start);
-    sampleFrameCount.push_back(sample_array.size()/channels);
+    sampleFrameCount.push_back(sample_array.size() / channels);
 
     // TODO: Implement loop
     sampleLoopStart.push_back(0);
@@ -414,7 +418,7 @@ void ProcessVoices(int threadNo, int numThreads, float *outputBuffer)
 
         // std::cout << " VoiceNo " << voiceNo << " Voice Detune " << self.voiceDetune[voiceNo] << std::endl;
         int voiceChannelCount = self.voiceChannelCount[voiceNo];
-        int voiceFrameCount   = self.voiceFrameCount[voiceNo];
+        int voiceFrameCount = self.voiceFrameCount[voiceNo];
         float thisEnvelopeVol = self.combinedEnvelope[(int)(self.indexInEnvelope[voiceNo])] * self.releaseVol[voiceNo] * self.velocityVol[voiceNo];
 
         if (self.indexInEnvelope[voiceNo] < self.envelopeEnd[voiceNo])
@@ -464,32 +468,34 @@ void ProcessVoices(int threadNo, int numThreads, float *outputBuffer)
                 int ceilIndex = floorIndex + voiceChannelCount;
 
                 // Handle looping or clamping at the end of the sample.
-                if (ceilIndex >= voiceFrameCount*voiceChannelCount)
+                if (ceilIndex >= voiceFrameCount * voiceChannelCount)
                 {
-                    ceilIndex = self.loop ? self.voiceLoopStart[voiceNo] : voiceFrameCount*voiceChannelCount - 1;
+                    ceilIndex = self.loop ? self.voiceLoopStart[voiceNo] : voiceFrameCount * voiceChannelCount - 1;
                     floorIndex = ceilIndex - voiceChannelCount;
                 }
-                
+
                 // Ensure indices remain within the binaryBlob bounds.
                 floorIndex = std::min(floorIndex, static_cast<int>(self.binaryBlob.size() - 1));
                 ceilIndex = std::min(ceilIndex, static_cast<int>(self.binaryBlob.size() - 1));
                 float thisSample = self.binaryBlob[self.voiceStart[voiceNo] + floorIndex];
                 float nextSample = self.binaryBlob[self.voiceStart[voiceNo] + ceilIndex];
                 // Denormal prevention.
-                if (fabs(thisSample) < 1e-15) thisSample = 0.0f;
-                if (fabs(nextSample) < 1e-15) nextSample = 0.0f;
+                if (fabs(thisSample) < 1e-15)
+                    thisSample = 0.0f;
+                if (fabs(nextSample) < 1e-15)
+                    nextSample = 0.0f;
 
                 for (int outchannel = 0; outchannel < self.outchannels; outchannel++)
                 {
                     // Linear interpolation using the proper fractional offset.
                     self.samples[outchannel][voiceNo][sampleNo] =
                         (thisSample * (1.0f - fraction) + nextSample * fraction) * // Interpolated sample
-                        self.masterVolume *                                          // Overall volume scaling
+                        self.masterVolume *                                        // Overall volume scaling
                         self.voiceChannelVol[voiceNo][inchannel][outchannel] *     // Voice-channel volume
                         self.rhodesEffect[outchannel];                             // Rhodes effect per output channel
                 }
             }
-            
+
             // Apply fade out if needed
             if (0)
             {
@@ -539,9 +545,9 @@ void SumSamples(int threadNo, int numThreads, float *outputBuffer)
 
 int Strike(int sampleNo, float velocity, float sampleDetune, float *patchEnvelope)
 {
-    std::lock_guard<std::mutex> lock(threadVoiceLocks[strikeIndex*self.threadCount / self.polyphony]);
+    std::lock_guard<std::mutex> lock(threadVoiceLocks[strikeIndex * self.threadCount / self.polyphony]);
 
-    //std::cout << "Striking sample " << sampleNo << " at strike index " << strikeIndex << std::endl;
+    // std::cout << "Striking sample " << sampleNo << " at strike index " << strikeIndex << std::endl;
     self.xfadeTrack[strikeIndex] = 0;
     self.xfadeTracknot[strikeIndex] = 1;
     self.dispatchFrameNo[strikeIndex] = 0;
@@ -579,9 +585,9 @@ int Strike(int sampleNo, float velocity, float sampleDetune, float *patchEnvelop
     self.releaseVol[strikeIndex] = 1;
     self.velocityVol[strikeIndex] = velocity / 255.0;
     self.indexInEnvelope[strikeIndex] = strikeIndex * self.envLenPerPatch;
-    
+
     self.voiceDetune[strikeIndex] = sampleDetune;
-    //std::cout << "Striking voice " << strikeIndex << " with detune " << self.voiceDetune[strikeIndex] << std::endl;
+    // std::cout << "Striking voice " << strikeIndex << " with detune " << self.voiceDetune[strikeIndex] << std::endl;
 
     self.voiceChannelVol[strikeIndex] = sampleChannelVol[sampleNo];
     self.voiceChannelCount[strikeIndex] = sampleChannelCount[sampleNo];
@@ -595,9 +601,13 @@ int Strike(int sampleNo, float velocity, float sampleDetune, float *patchEnvelop
     return (strikeIndex + self.polyphony - 1) % self.polyphony;
 }
 
-void ReleaseAll(float *env){
-    for(int key = 0; key < MIDI_KEY_COUNT; key++){
-        while(Release(key, env)){};
+void ReleaseAll(float *env)
+{
+    for (int key = 0; key < MIDI_KEY_COUNT; key++)
+    {
+        while (Release(key, env))
+        {
+        };
     }
 }
 
@@ -605,27 +615,34 @@ int Release(int midi_key, float *env)
 {
     int voicesToRelease = self.key2voiceIndex[midi_key].size();
     int voicesReleased = 0;
-    for (size_t i = 0; i < voicesToRelease; ++i) {
-        if (self.key2voiceIndex[midi_key].empty()) {
+    for (size_t i = 0; i < voicesToRelease; ++i)
+    {
+        if (self.key2voiceIndex[midi_key].empty())
+        {
             return voicesReleased; // No samples to release
-        }    
+        }
         int releaseIndex = self.key2voiceIndex[midi_key].front();
 
-        std::lock_guard<std::mutex> lock(threadVoiceLocks[releaseIndex*self.threadCount / self.polyphony]);
+        std::lock_guard<std::mutex> lock(threadVoiceLocks[releaseIndex * self.threadCount / self.polyphony]);
 
         self.key2voiceIndex[midi_key].erase(self.key2voiceIndex[midi_key].begin()); // Remove first element
 
         self.indexInEnvelope[releaseIndex] = releaseIndex * self.envLenPerPatch;
         // Apply envelope release if provided
-        if (env != nullptr) {
-            for (int envPosition = 0; envPosition < self.envLenPerPatch; envPosition++) {
+        if (env != nullptr)
+        {
+            for (int envPosition = 0; envPosition < self.envLenPerPatch; envPosition++)
+            {
                 int index = releaseIndex * self.envLenPerPatch + envPosition;
                 self.combinedEnvelope[index] = env[envPosition] * self.releaseVol[releaseIndex];
             }
-        } else {
+        }
+        else
+        {
             // Default release (full volume fade out)
-            
-            for (int envIndex = 0; envIndex < self.envLenPerPatch; envIndex++) {
+
+            for (int envIndex = 0; envIndex < self.envLenPerPatch; envIndex++)
+            {
                 int envelopeIndex = releaseIndex * self.envLenPerPatch + envIndex;
                 self.combinedEnvelope[envelopeIndex] = 1;
             }
@@ -637,8 +654,9 @@ int Release(int midi_key, float *env)
 
 void HardStop()
 {
-    for(int voiceIndex = 0; voiceIndex < self.polyphony; voiceIndex++){
-        std::lock_guard<std::mutex> lock(threadVoiceLocks[voiceIndex*self.threadCount / self.polyphony]);
+    for (int voiceIndex = 0; voiceIndex < self.polyphony; voiceIndex++)
+    {
+        std::lock_guard<std::mutex> lock(threadVoiceLocks[voiceIndex * self.threadCount / self.polyphony]);
 
         self.indexInEnvelope[strikeIndex] = strikeIndex * self.envLenPerPatch;
         self.releaseVol[strikeIndex] = 1.0f;
@@ -706,8 +724,8 @@ void DumpSampleInfo(const char *filename)
     json output;
     self.key2voiceIndex.resize(MIDI_KEY_COUNT);
 
-    output["key2sampleIndex"] = self.key2sampleIndex;
-    output["key2sampleDetune"] = self.key2sampleDetune;
+    output["key2sampleIndex"] = self.key2sampleIndex12TET;
+    output["key2sampleDetune"] = self.key2sampleDetune12TET;
     output["key2voiceIndex"] = self.key2voiceIndex;
 
     // Write to file
@@ -820,11 +838,51 @@ int LoadRestAudioB64(const json &sample)
     // std::cout << gains[0][0] << " " << gains[0][1] << std::endl;
     sampleChannelVol.push_back(gains); // Add a specific array of 3 elements
     sampleChannelCount.push_back(inchannels);
+    sampleFrequency.push_back(midiNoteTo12TETFreq(sample["pitch_keycenter"]));
+
+    // generate the keybindings for 12 tone harmonic
 
     AppendSample(samples, inchannels);
-    currPatchSampleNo++;
+    currAbsoluteSampleNo++;
 
     return 0;
+}
+
+void GenerateKeymap(double (*tuningSystemFn)(int), std::vector<std::vector<int>>& samplemap, std::vector<std::vector<float>>& sampledetune)
+{
+    // Ensure vectors are properly sized
+    samplemap.resize(MIDI_NOTES);
+    sampledetune.resize(MIDI_NOTES);
+
+    // find the nearest samples based on closest frequency
+    for (int midiNote = 0; midiNote < MIDI_NOTES; midiNote++)
+    {
+        float desiredFrequency = tuningSystemFn(midiNote);
+        
+        // Clear any existing mappings for this note
+        samplemap[midiNote].clear();
+        sampledetune[midiNote].clear();
+
+        // Find the sample with frequency closest to desired frequency
+        float minDifference = std::numeric_limits<float>::max();
+        int closestSampleIndex = -1;
+        float closestRatio = 1.0f;
+
+        // Only look at samples from the current instrument
+        for (int i = startSample; i < currAbsoluteSampleNo; i++) {
+            float difference = std::abs(std::log2(sampleFrequency[i] / desiredFrequency));
+            if (difference < minDifference) {
+                minDifference = difference;
+                closestSampleIndex = i;
+                closestRatio = desiredFrequency / sampleFrequency[i];
+            }
+        }
+
+        if (closestSampleIndex >= 0) {
+            samplemap[midiNote].push_back(closestSampleIndex);
+            sampledetune[midiNote].push_back(closestRatio);
+        }
+    }
 }
 
 // Load samples from JSON file
@@ -842,7 +900,13 @@ void LoadSoundJSON(const std::string &filename)
     json data = json::parse(buffer.begin(), buffer.end());
 
     int patchNoInFile = 0;
-    self.key2samples = data[patchNoInFile]["key2samples"];
+    // Generate the key bindings
+    self.key2samples12tet = data[patchNoInFile]["key2samples"];
+
+bool useExplicitMapping = self.key2samples12tet.size() > 0;
+
+    startSample = currAbsoluteSampleNo;
+    patchStartSample.push_back(currAbsoluteSampleNo);
 
     // Load samples
     for (const auto &instrument : data)
@@ -852,29 +916,54 @@ void LoadSoundJSON(const std::string &filename)
             LoadRestAudioB64(sample);
         }
     }
+    patchSampleCount.push_back(currAbsoluteSampleNo - startSample);
+
+    // If we have explicit key mappings in the JSON, use those
+    if (!self.key2samples12tet.empty()) {
+        for (const auto &keyAction : self.key2samples12tet) {
+            for (const auto &entry : keyAction) {
+                int keyTrigger = entry["keyTrigger"].get<int>();
+                int patchSampleNo = entry["sampleNo"].get<int>();
+                float detuneRatio = entry["pitchBend"].get<float>();
+
+                if (patchSampleNo >= startSample && patchSampleNo < currAbsoluteSampleNo) {
+                    self.key2sampleIndex12TET[keyTrigger].push_back(patchSampleNo);
+                    self.key2sampleDetune12TET[keyTrigger].push_back(detuneRatio);
+                }
+            }
+        }
+    } else {
+        // Otherwise generate mappings automatically
+        GenerateKeymap(midiNoteTo12TETFreq, self.key2sampleIndex12TET, self.key2sampleDetune12TET);
+    }
+    
+    // Always generate Maqam Rast mappings
+    GenerateKeymap(midiNoteToMaqamRastFreq, self.key2sampleIndexRast, self.key2sampleDetuneRast);
 
     std::cout << "Finished loading key mappings" << std::endl;
     std::cout << "Binary Blob size " << self.binaryBlob.size() << std::endl;
 }
-#define MIDI_NOTES 128
-#define MIDI_CC_SUSTAIN 64
-#define MIDI_CC_VOLUME 7
-#define MIDI_CC_MODULATION 1
-#define MIDI_CC_EXPRESSION 11
+
+// Global variable to track current tuning system
+static bool useRastTuning = false;
+
+void SetTuningSystem(bool useRast) {
+    useRastTuning = useRast;
+}
 
 void ProcessMidi(std::vector<unsigned char> *message)
 {
     unsigned int status = message->at(0);
     unsigned int midi_key = message->at(1);
     float velocity = int(message->at(2)) / 127.0f;
-    
-    //std::cout << "MIDI Status: " << status << ", Key: " << midi_key << ", Velocity: " << velocity << std::endl;
+
+    // std::cout << "MIDI Status: " << status << ", Key: " << midi_key << ", Velocity: " << velocity << std::endl;
 
     // 🎹 **Note On**
     if ((status & 0xF0) == 0x90 && velocity > 0)
     {
-        const auto &sampleIndex = self.key2sampleIndex[midi_key];
-        const auto &sampleDetune = self.key2sampleDetune[midi_key];
+        const auto &sampleIndex = useRastTuning ? self.key2sampleIndexRast[midi_key] : self.key2sampleIndex12TET[midi_key];
+        const auto &sampleDetune = useRastTuning ? self.key2sampleDetuneRast[midi_key] : self.key2sampleDetune12TET[midi_key];
 
         if (!sampleIndex.empty() && sampleIndex.size() == sampleDetune.size())
         {
@@ -947,18 +1036,18 @@ void ProcessMidi(std::vector<unsigned char> *message)
     // 🎚 **Pitch Bend Handling**
     else if ((status & 0xF0) == 0xE0)
     {
-        int bendLSB = message->at(1);  // Least Significant Byte
-        int bendMSB = message->at(2);  // Most Significant Byte
-        int bendValue = (bendMSB << 7) | bendLSB; // Combine into 14-bit value
+        int bendLSB = message->at(1);                        // Least Significant Byte
+        int bendMSB = message->at(2);                        // Most Significant Byte
+        int bendValue = (bendMSB << 7) | bendLSB;            // Combine into 14-bit value
         float normalizedBend = (bendValue - 8192) / 8192.0f; // Convert to -1.0 to +1.0 range
-        normalizedBend *= 2; // 2 step bend
+        normalizedBend *= 2;                                 // 2 step bend
 
         std::cout << "Pitch Bend: " << normalizedBend << std::endl;
 
         // Apply pitch bend to all active voices
         for (int voiceIndex = 0; voiceIndex < self.polyphony; voiceIndex++)
         {
-            std::lock_guard<std::mutex> lock(threadVoiceLocks[voiceIndex*self.threadCount / self.polyphony]);
+            std::lock_guard<std::mutex> lock(threadVoiceLocks[voiceIndex * self.threadCount / self.polyphony]);
             self.pitchWheel[voiceIndex] = normalizedBend;
         }
     }
@@ -969,10 +1058,13 @@ int audioCallback(void *outputBuffer, void * /*inputBuffer*/, unsigned int nBuff
 {
     auto *buffer = static_cast<float *>(outputBuffer);
     std::lock_guard<std::mutex> lock(self.blobMutex);
-    if(self.threadCount < 2) {
+    if (self.threadCount < 2)
+    {
         ProcessVoices(0, 1, buffer);
         SumSamples(0, 1, buffer);
-    } else {
+    }
+    else
+    {
         RunMultithread(self.threadCount, buffer, ProcessVoicesThreadWrapper);
         RunMultithread(self.threadCount, buffer, SumSamplesThreadWrapper);
     }
@@ -1031,7 +1123,7 @@ void Test()
 
     std::vector<unsigned char> message = {0x90, 45, 127}; // Note on
     ProcessMidi(&message);
-    
+
     for (int i = 0; i < numBuffers; i++)
     {
         // Compute the starting index in the buffer vector
@@ -1039,14 +1131,14 @@ void Test()
         ProcessVoices(0, 1, buffer.data() + startIndex);
 
         // increase the pitch
-        float bendAmount = float(i) / numBuffers; 
+        float bendAmount = float(i) / numBuffers;
         int bendValue = static_cast<int>((bendAmount + 1.0) * 8192.0);
-        bendValue = std::clamp(bendValue, 0, 16383); // Ensure within valid range
-        unsigned char lsb = bendValue & 0x7F;        // Least Significant Byte
-        unsigned char msb = (bendValue >> 7) & 0x7F; // Most Significant Byte
+        bendValue = std::clamp(bendValue, 0, 16383);           // Ensure within valid range
+        unsigned char lsb = bendValue & 0x7F;                  // Least Significant Byte
+        unsigned char msb = (bendValue >> 7) & 0x7F;           // Most Significant Byte
         std::vector<unsigned char> message = {0xE0, lsb, msb}; // Pitch Bend on Channel 1
-        //ProcessMidi(&message);
+        // ProcessMidi(&message);
     }
-    
+
     WriteVectorToWav(buffer, "Bend.wav", self.outchannels);
 }

@@ -9,7 +9,6 @@
 #include <rtmidi/RtMidi.h>
 #include <map>
 #include <memory>
-#include <QDebug>
 #include "sample_compute.hpp"
 
 class PianoKey : public QWidget
@@ -96,7 +95,9 @@ public:
             }
             else
             {
-                key->move(x - key->width() / 2, 0);
+                //key->move(x - key->width() / 2, 0);
+                key->move(x, 0);
+
             }
 
             keys_[note] = key;

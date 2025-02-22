@@ -2,8 +2,10 @@
 #include <QtWidgets/QMainWindow>
 #include <QtWidgets/QPushButton>
 #include <QtWidgets/QHBoxLayout>
+#include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QWidget>
 #include <QtWidgets/QSlider>
+#include <QtWidgets/QComboBox>
 #include <QtGui/QPainter>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QKeyEvent>
@@ -19,11 +21,6 @@
 #include <fstream>
 #include <iostream>
 
-// Convert MIDI note to frequency
-double midiNoteToFreq(int note)
-{
-    return 440.0 * std::pow(2.0, (note - 69) / 12.0);
-}
 
 class SynthWindow : public QMainWindow
 {
@@ -37,10 +34,21 @@ public:
         auto centralWidget = new QWidget(this);
         setCentralWidget(centralWidget);
 
-        auto layout = new QHBoxLayout(centralWidget);
+        auto mainLayout = new QVBoxLayout(centralWidget);
+        auto controlLayout = new QHBoxLayout();
+        auto keyboardLayout = new QHBoxLayout();
+
+        // Create tuning system selector
+        tuningSelector_ = new QComboBox(this);
+        tuningSelector_->addItem("12-TET", 0);
+        tuningSelector_->addItem("Rast", 1);
+        connect(tuningSelector_, QOverload<int>::of(&QComboBox::currentIndexChanged), 
+                this, &SynthWindow::onTuningChanged);
+        controlLayout->addWidget(tuningSelector_);
+        controlLayout->addStretch();
 
         keyboard_ = new PianoKeyboard(this);
-        layout->addWidget(keyboard_);
+        keyboardLayout->addWidget(keyboard_);
 
         // Create volume slider
         volumeSlider_ = new QSlider(Qt::Vertical, this);
@@ -50,7 +58,10 @@ public:
         volumeSlider_->setTickPosition(QSlider::TicksBothSides);
         volumeSlider_->setTickInterval(10);
         connect(volumeSlider_, &QSlider::valueChanged, this, &SynthWindow::onVolumeChanged);
-        layout->addWidget(volumeSlider_);
+        keyboardLayout->addWidget(volumeSlider_);
+
+        mainLayout->addLayout(controlLayout);
+        mainLayout->addLayout(keyboardLayout);
 
         // Enable keyboard focus
         setFocusPolicy(Qt::StrongFocus);
@@ -147,12 +158,17 @@ private:
         }
     }
 
+    void onTuningChanged(int index) {
+        SetTuningSystem(index == 1); // true for Rast, false for 12-TET
+    }
+
     void onVolumeChanged(int value) {
         float normalizedVolume = value / 100.0f;
         SetVolume(normalizedVolume);
     }
 
     PianoKeyboard *keyboard_;
+    QComboBox *tuningSelector_;
     QSlider *volumeSlider_;
     std::unique_ptr<RtMidiIn> midiIn_;
     std::vector<std::unique_ptr<RtMidiIn>> midiInputs_;
@@ -167,7 +183,7 @@ int lfoCount = 16;
 int envLenPerPatch = 512;
 int outchannels = 2;
 float bendDepth = 2.0f;
-int bufferCount = 4;
+int bufferCount = 2;
 int threadCount = 4;
 
 // Print help information
@@ -183,7 +199,8 @@ void printHelp()
               << "  --env <n>           Set envelope length per patch (default: " << envLenPerPatch << ")\n"
               << "  --channels <n>      Set output channels (default: " << outchannels << ")\n"
               << "  --bend <n>          Set pitch bend depth (default: " << bendDepth << ")\n"
-              << "  --buffers <n>       Set audio buffer count (default: " << bufferCount << ")\n";
+              << "  --buffers <n>       Set audio buffer count (default: " << bufferCount << ")\n"
+              << "  --threadcount <n>   Set audio thread count (default: " << threadCount << ")\n";
 }
 
 int main(int argc, char *argv[])
