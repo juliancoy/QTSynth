@@ -95,9 +95,7 @@ public:
             }
             else
             {
-                //key->move(x - key->width() / 2, 0);
-                key->move(x, 0);
-
+                key->move(x - key->width() / 4, 0);
             }
 
             keys_[note] = key;
