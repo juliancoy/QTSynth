@@ -28,7 +28,7 @@ typedef struct SampleCompute
 {
     int threadCount = 2;
     int polyphony;
-    int sampleRate = 44100; // Default sample rate
+    int outSampleRate = 44100; // Default sample rate
     bool sustainPedalOn = false;
     float modulationDepth = 0;
     float expression = 0;
@@ -67,10 +67,10 @@ typedef struct SampleCompute
     std::vector<std::vector<float>> accumulation;
     std::vector<std::vector<float>> sampleWithinDispatchPostBend;
 
-    std::vector<std::vector<int>> key2sampleIndex12TET;
-    std::vector<std::vector<float>> key2sampleDetune12TET;
-    std::vector<std::vector<int>> key2sampleIndexRast;
-    std::vector<std::vector<float>> key2sampleDetuneRast;
+    // Tuning system mappings
+    std::vector<std::vector<std::vector<int>>> key2sampleIndexAll;
+    std::vector<std::vector<std::vector<float>>> key2sampleDetuneAll;
+
     std::vector<std::vector<int>> key2voiceIndex;
 
     json key2samples12tet; 
@@ -93,17 +93,27 @@ typedef struct SampleCompute
     std::vector<float> currEnvelopeVol;
     std::vector<float> nextEnvelopeVol;
     int lfoCount;
-    unsigned int samplesPerDispatch;
+    unsigned int framesPerDispatch;
 } SampleCompute;
 
 
 // Extended ThreadData structure to include outputBuffer
+// Thread pool data structures
 typedef struct ThreadData {
     SampleCompute *sampleCompute;
     int threadCount;
     int threadNo;
     float *outputBuffer;
+    bool shouldExit;
+    pthread_mutex_t mutex;
+    pthread_cond_t condition;
+    bool hasWork;
+    void *(*workFunction)(void *);
 } ThreadData;
+
+// Thread pool management
+void InitThreadPool(int numThreads);
+void DestroyThreadPool();
 
 // Internal "private" functions
 void Init(int polyphony, int samplesPerDispatch, int lfoCount, int envLenPerPatch, int outchannels, float bendDepth, float sampleRate, int threadCount);
@@ -124,7 +134,7 @@ void HardStop(int voiceIndex);
 void RunMultithread(int numThreads, float *outputBuffer);
 void Dump(const char* filename);
 int Release(int voiceIndex, float *env);
-void SetTuningSystem(bool useRast);
+void SetTuningSystem(int tuningSystem);
 
 double midiNoteTo12TETFreq(int note);
 

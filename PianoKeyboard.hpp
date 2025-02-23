@@ -95,11 +95,18 @@ public:
             }
             else
             {
-                key->move(x - key->width() / 4, 0);
+                key->move(x - key->width() / 2, 0);
             }
 
             keys_[note] = key;
         }
+
+        for (auto &[note, key] : keys_) {
+            if (key->isBlack()) {
+                key->raise(); // Bring black keys to the top
+            }
+        }
+        
     }
 
     ~PianoKeyboard()

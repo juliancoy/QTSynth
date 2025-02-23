@@ -1,0 +1,1 @@
+valgrind --tool=callgrind --callgrind-out-file=callgrind.out "$HOME/Documents/QTSynth/QTSynth --polyphony 128 --samples 256 --threadcount 8 --samplerate 48000 --buffers 6"

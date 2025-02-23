@@ -12,3 +12,4 @@ samples
 QTSynth_autogen
 QTSynth
 callgrind.out
+result_dir

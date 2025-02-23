@@ -41,7 +41,13 @@ public:
         // Create tuning system selector
         tuningSelector_ = new QComboBox(this);
         tuningSelector_->addItem("12-TET", 0);
-        tuningSelector_->addItem("Rast", 1);
+        tuningSelector_->addItem("Rast راست", 1);
+        tuningSelector_->addItem("Pythagorean", 2);
+        tuningSelector_->addItem("Raga Yaman", 3);
+        tuningSelector_->addItem("Bohlen-Pierce", 4);
+        tuningSelector_->addItem("Bayati بياتي", 5);
+        tuningSelector_->addItem("Slendro-Pelog", 6);
+        tuningSelector_->addItem("Harmonic Series", 7);
         connect(tuningSelector_, QOverload<int>::of(&QComboBox::currentIndexChanged), 
                 this, &SynthWindow::onTuningChanged);
         controlLayout->addWidget(tuningSelector_);
@@ -159,7 +165,7 @@ private:
     }
 
     void onTuningChanged(int index) {
-        SetTuningSystem(index == 1); // true for Rast, false for 12-TET
+        SetTuningSystem(index); // Pass the tuning system index directly
     }
 
     void onVolumeChanged(int value) {
@@ -175,7 +181,10 @@ private:
     float currentVolume_ = 0.5f; // Track current volume
 };
 
+#include <string>
+
 // Handle command line arguments
+std::string sampleFilename = "Harp.json";
 int polyphony = 64;
 int samplesPerDispatch = 128;
 int sampleRate = 44100;
@@ -200,7 +209,8 @@ void printHelp()
               << "  --channels <n>      Set output channels (default: " << outchannels << ")\n"
               << "  --bend <n>          Set pitch bend depth (default: " << bendDepth << ")\n"
               << "  --buffers <n>       Set audio buffer count (default: " << bufferCount << ")\n"
-              << "  --threadcount <n>   Set audio thread count (default: " << threadCount << ")\n";
+              << "  --threadcount <n>   Set audio thread count (default: " << threadCount << ")\n"
+              << "  --sampleFilename <file>  Set sample file path (default: " << sampleFilename << ")\n";
 }
 
 int main(int argc, char *argv[])
@@ -237,11 +247,13 @@ int main(int argc, char *argv[])
             bufferCount = std::stoi(argv[++i]);
         else if (arg == "--threadcount" && i + 1 < argc)
             threadCount = std::stoi(argv[++i]);
+        else if (arg == "--sampleFilename" && i + 1 < argc)
+            sampleFilename = argv[++i];
     }
 
     QApplication app(argc, argv);
     Init(polyphony, samplesPerDispatch, lfoCount, envLenPerPatch, outchannels, bendDepth, sampleRate, threadCount);
-    LoadSoundJSON("Harp.json");
+    LoadSoundJSON(sampleFilename);
     InitAudio(bufferCount);
     
     std::cout << "Creating window" << std::endl;
