@@ -24,15 +24,48 @@ using json = nlohmann::json;
 #define FILTER_STEPS 512
 // cdef.h
 
+// Cache-friendly sample storage
+struct alignas(64) SampleData
+{                                                 // Align to 64-byte cache line
+    float *samples;                               // Contiguous sample data
+    size_t numFrames;                             // Number of frames
+    size_t numChannels;                           // Number of channels
+    float baseFrequency;                          // Sample frequency
+    float sampleRate;                             // Sample rate
+    int loopStart;                                // Loop start frame
+    int loopLength;                               // Loop length in frames
+    int loopEnd;                                  // Loop end frame
+    float strikeVolume;                           // Strike volume
+    float *envelope;                              // Envelope data
+    std::vector<std::vector<float>> volumeMatrix; // Channel volume matrix per sample
+};
+
+typedef struct Patch
+{
+    // Tuning system mappings
+    std::vector<std::vector<std::vector<int>>> key2sampleIndexAll;
+    std::vector<std::vector<std::vector<float>>> key2sampleDetuneAll;
+    std::vector<std::vector<int>> key2voiceIndex;
+
+    std::vector<std::vector<int>> *key2sampleIndex;
+    std::vector<std::vector<float>> *key2sampleDetune;
+
+    bool sustainPedalOn = false;
+    float modulationDepth = 0;
+    float expression = 0;
+    float bendDepth = 2;
+    json key2samples12tet;
+
+    std::vector<SampleData> samplesData; // All samples in contiguous blocks
+
+} Patch;
+
 typedef struct SampleCompute
 {
     int threadCount = 2;
     int polyphony;
     int outSampleRate = 44100; // Default sample rate
-    bool sustainPedalOn = false;
-    float modulationDepth = 0;
-    float expression = 0;
-    float bendDepth = 2;
+    std::mutex samplesMutex;
 
     std::vector<float> lfoPhase;
     std::vector<float> lfoIncreasePerDispatch;
@@ -52,37 +85,21 @@ typedef struct SampleCompute
 
     int outchannels;
     int envLenPerPatch;
-    float loop;
-    std::vector<float> voiceLoopStart;
-    std::vector<float> voiceLoopEnd;
-    std::vector<float> voiceLoopLength;
+    bool loop = false;
+    std::vector<SampleData *> voiceSamplePtr;
     std::vector<float> slaveFade;
-    std::vector<float> voiceStart;
-    std::vector<float> voiceFrameCount;
     std::vector<float> voiceDetune;
-    std::vector<float> voiceChannelCount;
-    std::vector<std::vector<std::vector<float>>> voiceChannelVol;
     std::vector<float> noLoopFade;
 
     std::vector<std::vector<float>> accumulation;
     std::vector<std::vector<float>> sampleWithinDispatchPostBend;
 
-    // Tuning system mappings
-    std::vector<std::vector<std::vector<int>>> key2sampleIndexAll;
-    std::vector<std::vector<std::vector<float>>> key2sampleDetuneAll;
-
-    std::vector<std::vector<int>> key2voiceIndex;
-
-    json key2samples12tet; 
     float masterVolume;
 
     std::vector<float> pitchWheel;
     std::vector<float> portamento;
     std::vector<float> portamentoAlpha;
     std::vector<float> portamentoTarget;
-
-    std::mutex blobMutex;
-    std::vector<float> binaryBlob;
 
     std::vector<float> releaseVol;
     std::vector<float> combinedEnvelope;
@@ -96,10 +113,10 @@ typedef struct SampleCompute
     unsigned int framesPerDispatch;
 } SampleCompute;
 
-
 // Extended ThreadData structure to include outputBuffer
 // Thread pool data structures
-typedef struct ThreadData {
+typedef struct ThreadData
+{
     SampleCompute *sampleCompute;
     int threadCount;
     int threadNo;
@@ -125,16 +142,17 @@ void UpdateDetune(float detune, int index);
 int GetEnvLenPerPatch();
 int AdvanceEnvelope();
 void ApplyPanning();
-int AppendSample(std::vector<float> npArray, int channels);
+int AppendSample(std::vector<float> samples, float sampleRate, int inchannels, float baseFrequency);
 void DeleteMem(int startAddr, int endAddr);
 void ProcessVoices(int threadNo, int numThreads, float *outputBuffer);
 void SumSamples(int threadNo, int numThreads, float *outputBuffer);
-int Strike(int sampleNo, float velocity, float sampleDetune, float *patchEnvelope);
+int Strike(SampleData * sample, float velocity, float sampleDetune, float *patchEnvelope);
 void HardStop(int voiceIndex);
 void RunMultithread(int numThreads, float *outputBuffer);
-void Dump(const char* filename);
+void Dump(const char *filename);
 int Release(int voiceIndex, float *env);
 void SetTuningSystem(int tuningSystem);
+void DeleteSample(int sampleNo, Patch patch);
 
 double midiNoteTo12TETFreq(int note);
 
@@ -143,7 +161,6 @@ int LoadRestAudioB64(const json &sample);
 void ProcessMidi(std::vector<unsigned char> *message);
 void LoadSoundJSON(const std::string &filename);
 void Test();
-
 
 /*
 // 5.1 surround angles (excluding LFE)
