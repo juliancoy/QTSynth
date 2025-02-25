@@ -16,10 +16,18 @@
 #include <cmath>
 #include <memory>
 #include <map>
+#include <string>
 #include <vector>
 #include <mutex>
 #include <fstream>
 #include <iostream>
+
+typedef struct MIDIDevice
+{
+    std::vector<Patch> patches;
+    std::unique_ptr<RtMidiIn> midiIn;
+    std::string name;
+} MIDIDevice;
 
 
 class SynthWindow : public QMainWindow
@@ -88,7 +96,10 @@ public:
                     midiIn->openPort(i);
                     midiIn->setCallback(&SynthWindow::midiCallback, this);
                     midiIn->ignoreTypes(false, false, false);
-                    midiInputs_.push_back(std::move(midiIn));
+                    MIDIDevice newDevice;
+                    newDevice.midiIn = &midiIn;
+                    newDevice.name = midiIn_->getPortName(i);
+                    MIDIDevices.push_back(newDevice);
 
                     std::cout << "Opened MIDI port " << i << ": "
                               << midiIn_->getPortName(i) << std::endl;
@@ -107,9 +118,9 @@ public:
 
     ~SynthWindow()
     {
-        for (auto &midiIn : midiInputs_)
+        for (auto &device : MIDIDevices)
         {
-            midiIn->closePort();
+            device.midiIn->closePort();
         }
     }
 
@@ -165,7 +176,11 @@ private:
     }
 
     void onTuningChanged(int index) {
-        SetTuningSystem(index); // Pass the tuning system index directly
+        for(auto &device: MIDIDevices){
+            for(auto &patch: device.patches){
+                SetTuningSystem(index, &patch); // Pass the tuning system index directly
+            }
+        }
     }
 
     void onVolumeChanged(int value) {
@@ -177,7 +192,7 @@ private:
     QComboBox *tuningSelector_;
     QSlider *volumeSlider_;
     std::unique_ptr<RtMidiIn> midiIn_;
-    std::vector<std::unique_ptr<RtMidiIn>> midiInputs_;
+    std::vector<MIDIDevice> MIDIDevices;
     float currentVolume_ = 0.5f; // Track current volume
 };
 

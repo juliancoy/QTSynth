@@ -43,7 +43,7 @@ struct alignas(64) SampleData
 typedef struct Patch
 {
     // Tuning system mappings
-    std::vector<std::vector<std::vector<int>>> key2sampleIndexAll;
+    std::vector<std::vector<std::vector<int>>> key2sampleIndexAll; // Tuning system, key, samples
     std::vector<std::vector<std::vector<float>>> key2sampleDetuneAll;
     std::vector<std::vector<int>> key2voiceIndex;
 
@@ -147,12 +147,12 @@ void DeleteMem(int startAddr, int endAddr);
 void ProcessVoices(int threadNo, int numThreads, float *outputBuffer);
 void SumSamples(int threadNo, int numThreads, float *outputBuffer);
 int Strike(SampleData * sample, float velocity, float sampleDetune, float *patchEnvelope);
-void HardStop(int voiceIndex);
-void RunMultithread(int numThreads, float *outputBuffer);
+void HardStop();
+void RunMultithread(int numThreads, float *outputBuffer, void *(*threadFunc)(void *));
 void Dump(const char *filename);
-int Release(int voiceIndex, float *env);
-void SetTuningSystem(int tuningSystem);
-void DeleteSample(int sampleNo, Patch patch);
+int Release(int midi_key, float *env, Patch * patch);
+void SetTuningSystem(int tuningSystem, Patch * patch);
+void DeleteSample(int sampleNo, Patch * patch);
 
 double midiNoteTo12TETFreq(int note);
 

@@ -36,8 +36,7 @@ static ThreadData *threadData = nullptr;
 static int numThreadsInPool = 0;
 
 SampleCompute self;
-std::vector<Patch> patches;
-std::mutex threadVoiceLocks[128];              // Fixed array of locks, one per voice
+std::mutex threadVoiceLocks[128]; // Fixed array of locks, one per voice
 
 int strikeIndex = 0;
 
@@ -362,6 +361,10 @@ void Init(int polyphony, int samplesPerDispatch, int lfoCount, int envLenPerPatc
     self.indexInEnvelope.resize(polyphony, 0.0f);
 
     self.nextEnvelopeVol.resize(polyphony, 0.0f);
+
+    // Initialize voiceSamplePtr vector
+    self.voiceSamplePtr.resize(polyphony, nullptr);
+
     // No need to resize fixed array of mutexes
 }
 
@@ -385,7 +388,7 @@ int GetEnvLenPerPatch()
 // Function to append multichannel audio data
 int AppendSample(std::vector<float> samples, float sampleRate, int inchannels, float baseFrequency)
 {
-    
+
     // Number of frames (samples per channel)
     size_t frameCount = samples.size() / inchannels;
 
@@ -429,7 +432,7 @@ int AppendSample(std::vector<float> samples, float sampleRate, int inchannels, f
             volumeMatrix[inchannel][outchannel] *= normalizationFactor;
         }
     }
-    
+
     std::lock_guard<std::mutex> lock(self.samplesMutex);
 
     SampleData newSample;
@@ -437,7 +440,9 @@ int AppendSample(std::vector<float> samples, float sampleRate, int inchannels, f
     newSample.numChannels = inchannels;
     newSample.numFrames = frameCount;
     newSample.baseFrequency = baseFrequency;
-    newSample.samples = samples;        // Copy the sample data
+    // Allocate memory for samples and copy the data
+    newSample.samples = new float[samples.size()];
+    std::copy(samples.begin(), samples.end(), newSample.samples);
     newSample.loopStart = 0;
     newSample.loopLength = newSample.numFrames;
     newSample.loopEnd = newSample.numFrames;
@@ -447,10 +452,13 @@ int AppendSample(std::vector<float> samples, float sampleRate, int inchannels, f
     return 0;
 }
 
-// Function to delete a portion of memory from binaryBlob
-void DeleteSample(int sampleNo, Patch patch)
+// Function to delete a sample from a patch
+void DeleteSample(int sampleNo, Patch *patch)
 {
-    patch.samplesData.erase(sampleNo);
+    if (sampleNo >= 0 && sampleNo < patch->samplesData.size())
+    {
+        patch->samplesData.erase(patch->samplesData.begin() + sampleNo);
+    }
 }
 
 void ProcessVoices(int threadNo, int numThreads, float *outputBuffer)
@@ -486,14 +494,14 @@ void ProcessVoices(int threadNo, int numThreads, float *outputBuffer)
     // Process each voice
     for (int voiceNo = firstVoice; voiceNo < lastVoice; voiceNo++)
     {
-        SampleData * sample = self.voiceSamplePtr[voiceNo];
+        SampleData *sample = self.voiceSamplePtr[voiceNo];
         float thisEnvelopeVol = self.combinedEnvelope[(int)(self.indexInEnvelope[voiceNo])] * self.releaseVol[voiceNo] * self.velocityVol[voiceNo];
-        
+
         if (sample == nullptr)
         {
             continue;
         }
-        
+
         int voiceChannelCount = sample->numChannels;
         int voiceFrameCount = sample->numFrames;
         int voiceLoopEnd = sample->loopEnd;
@@ -569,7 +577,7 @@ void ProcessVoices(int threadNo, int numThreads, float *outputBuffer)
 
             // Calculate the next dispatch phase
             float increment = self.voiceDetune[voiceNo] * self.portamento[voiceNo] * self.pitchWheel[voiceNo];
-            std::cout << increment << " " << std::endl;
+            // Remove debug print for performance
 
             dispatchFrameNo = std::clamp(dispatchFrameNo + increment, 0.0f, voiceFrameCount - 2.0f);
 
@@ -605,7 +613,7 @@ void SumSamples(int threadNo, int numThreads, float *outputBuffer)
     }
 }
 
-int Strike(SampleData * sample, float velocity, float sampleDetune, float *patchEnvelope)
+int Strike(SampleData *sample, float velocity, float sampleDetune, float *patchEnvelope)
 {
     std::lock_guard<std::mutex> lock(threadVoiceLocks[strikeIndex * self.threadCount / self.polyphony]);
 
@@ -666,21 +674,21 @@ void ReleaseAll(float *env)
     }
 }
 
-int Release(int midi_key, float *env, Patch patch)
+int Release(int midi_key, float *env, Patch *patch)
 {
-    int voicesToRelease = patch.key2voiceIndex[midi_key].size();
+    int voicesToRelease = patch->key2voiceIndex[midi_key].size();
     int voicesReleased = 0;
     for (size_t i = 0; i < voicesToRelease; ++i)
     {
-        if (patch.key2voiceIndex[midi_key].empty())
+        if (patch->key2voiceIndex[midi_key].empty())
         {
             return voicesReleased; // No samples to release
         }
-        int releaseIndex = patch.key2voiceIndex[midi_key].front();
+        int releaseIndex = patch->key2voiceIndex[midi_key].front();
 
         std::lock_guard<std::mutex> lock(threadVoiceLocks[releaseIndex * self.threadCount / self.polyphony]);
 
-        patch.key2voiceIndex[midi_key].erase(patch.key2voiceIndex[midi_key].begin()); // Remove first element
+        patch->key2voiceIndex[midi_key].erase(patch->key2voiceIndex[midi_key].begin()); // Remove first element
 
         self.indexInEnvelope[releaseIndex] = releaseIndex * self.envLenPerPatch;
         // Apply envelope release if provided
@@ -814,7 +822,7 @@ int LoadRestAudioB64(const json &sample)
         {
             size_t totalFrames = wav.totalPCMFrameCount * wav.channels;
             samples.resize(totalFrames); // Allocate memory for PCM data
-            
+
             drwav_read_pcm_frames_f32(&wav, wav.totalPCMFrameCount, samples.data());
             sampleRate = wav.sampleRate;
             inchannels = wav.channels;
@@ -829,7 +837,7 @@ int LoadRestAudioB64(const json &sample)
             drmp3_uint64 frameCount = drmp3_get_pcm_frame_count(&mp3);
             size_t totalFrames = frameCount * mp3.channels;
             samples.resize(totalFrames); // Allocate memory for PCM data
-            
+
             drmp3_read_pcm_frames_f32(&mp3, frameCount, samples.data());
             sampleRate = mp3.sampleRate;
             inchannels = mp3.channels;
@@ -850,44 +858,58 @@ int LoadRestAudioB64(const json &sample)
     return 0;
 }
 
-
-void GenerateKeymap(double (*tuningSystemFn)(int), Patch patch)
+void GenerateKeymap(double (*tuningSystemFn)(int), Patch *patch)
 {
-    std::vector<std::vector<SampleData *>> thisKeyMap;
-    std::vector<std::vector<float>> thisDetune;
-    thisKeyMap.resize(MIDI_NOTES);
-    thisDetune.resize(MIDI_NOTES);
+    // Create vectors to store sample indices and detune values
+    std::vector<std::vector<int>> thisKeyMap(MIDI_NOTES);
+    std::vector<std::vector<float>> thisDetune(MIDI_NOTES);
 
-    // find the nearest samples based on closest frequency
+    // Create a temporary map to store pointers for quick lookup
+    std::vector<SampleData *> samplePtrs;
+    for (SampleData &sample : patch->samplesData)
+    {
+        samplePtrs.push_back(&sample);
+    }
+
+    // Find the nearest samples based on closest frequency
     for (int midiNote = 0; midiNote < MIDI_NOTES; midiNote++)
     {
         float desiredFrequency = tuningSystemFn(midiNote);
 
         // Find the sample with frequency closest to desired frequency
         float minDifference = std::numeric_limits<float>::max();
-        SampleData * closestSampleIndex = nullptr;
+        SampleData *closestSample = nullptr;
         float closestRatio = 1.0f;
 
         // Only look at samples from the current instrument
-        for (SampleData &sample: patch.samplesData)
+        for (size_t i = 0; i < patch->samplesData.size(); i++)
         {
+            SampleData &sample = patch->samplesData[i];
             float difference = std::abs(std::log2(sample.baseFrequency / desiredFrequency));
             if (difference < minDifference)
             {
                 minDifference = difference;
-                closestSampleIndex = &sample;
+                closestSample = &sample;
                 closestRatio = desiredFrequency / sample.baseFrequency;
             }
         }
 
-        if (closestSampleIndex >= 0)
+        if (closestSample != nullptr)
         {
-            thisKeyMap[midiNote].push_back(closestSampleIndex);
-            thisDetune[midiNote].push_back(closestRatio);
+            // Find the index of the closest sample in the samplesData vector
+            auto it = std::find(samplePtrs.begin(), samplePtrs.end(), closestSample);
+            if (it != samplePtrs.end())
+            {
+                int sampleIndex = std::distance(samplePtrs.begin(), it);
+                thisKeyMap[midiNote].push_back(sampleIndex);
+                thisDetune[midiNote].push_back(closestRatio);
+            }
         }
     }
-    patch.key2sampleIndexAll.push_back(thisKeyMap);
-    patch.key2sampleDetuneAll.push_back(thisDetune);
+
+    // Add the new keymap to the patch
+    patch->key2sampleIndexAll.push_back(thisKeyMap);
+    patch->key2sampleDetuneAll.push_back(thisDetune);
 }
 
 // Load samples from JSON file
@@ -954,31 +976,34 @@ void LoadSoundJSON(const std::string &filename)
     else
     {
         // Otherwise generate mappings automatically
-        GenerateKeymap(midiNoteTo12TETFreq, newPatch);
+        GenerateKeymap(midiNoteTo12TETFreq, &newPatch);
     }
 
     // Always generate Maqam Rast mappings
-    GenerateKeymap(midiNoteToMaqamRastFreq, newPatch);
-    GenerateKeymap(midiNoteToPythagoreanFreq, newPatch);
-    GenerateKeymap(midiNoteToRagaYamanFreq, newPatch);
-    GenerateKeymap(midiNoteToBohlenPierceFreq, newPatch);
-    GenerateKeymap(midiNoteToMaqamBayatiFreq, newPatch);
-    GenerateKeymap(midiNoteToSlendroPelogFreq, newPatch);
-    GenerateKeymap(midiNoteToHarmonicSeriesFreq, newPatch);
+    GenerateKeymap(midiNoteToMaqamRastFreq, &newPatch);
+    GenerateKeymap(midiNoteToPythagoreanFreq, &newPatch);
+    GenerateKeymap(midiNoteToRagaYamanFreq, &newPatch);
+    GenerateKeymap(midiNoteToBohlenPierceFreq, &newPatch);
+    GenerateKeymap(midiNoteToMaqamBayatiFreq, &newPatch);
+    GenerateKeymap(midiNoteToSlendroPelogFreq, &newPatch);
+    GenerateKeymap(midiNoteToHarmonicSeriesFreq, &newPatch);
 
     SetTuningSystem(0);
 
     std::cout << "Finished loading key mappings" << std::endl;
 }
 
-void SetTuningSystem(int tuningSystem, Patch patch)
+void SetTuningSystem(int tuningSystem)
 {
-    currentTuningSystem = tuningSystem;
-    patch.key2sampleIndex = &patch.key2sampleIndexAll[tuningSystem];
-    patch.key2sampleDetune = &patch.key2sampleDetuneAll[tuningSystem];
+    for (Patch &patch : patches)
+    {
+        currentTuningSystem = tuningSystem;
+        patch.key2sampleIndex = &patch.key2sampleIndexAll[tuningSystem];
+        patch.key2sampleDetune = &patch.key2sampleDetuneAll[tuningSystem];
+    }
 }
 
-void PatchProcessMidi(std::vector<unsigned char> *message, Patch patch)
+void PatchProcessMidi(std::vector<unsigned char> *message, Patch *patch)
 {
     unsigned int status = message->at(0);
     unsigned int midi_key = message->at(1);
@@ -990,24 +1015,24 @@ void PatchProcessMidi(std::vector<unsigned char> *message, Patch patch)
     if ((status & 0xF0) == 0x90 && velocity > 0)
     {
         // Get the vector of sample indices for this MIDI key
-        const auto &sampleIndices = (*patch.key2sampleIndex)[midi_key];
-        const auto &sampleDetunes = (*patch.key2sampleDetune)[midi_key];
+        const auto &sampleIndices = (*patch->key2sampleIndex)[midi_key];
+        const auto &sampleDetunes = (*patch->key2sampleDetune)[midi_key];
 
         // Iterate through each sample index for this key
-        for (SampleData &sample: patch.samplesData)
+        for (int sampleNo = 0; sampleNo < sampleIndices.size(); sampleNo++)
         {
-            int voiceIndex = Strike(&sample, velocity, nullptr);
-            patch.key2voiceIndex[midi_key].push_back(voiceIndex);
+            int voiceIndex = Strike(&patch->samplesData[sampleIndices[sampleNo]], velocity, sampleDetunes[sampleNo], nullptr);
+            patch->key2voiceIndex[midi_key].push_back(voiceIndex);
         }
     }
 
     // 🎵 **Note Off**
     else if ((status & 0xF0) == 0x80 || ((status & 0xF0) == 0x90 && velocity == 0))
     {
-        while (!patch.key2voiceIndex[midi_key].empty())
+        while (!patch->key2voiceIndex[midi_key].empty())
         {
-            int voiceIndex = patch.key2voiceIndex[midi_key].front();
-            patch.key2voiceIndex[midi_key].erase(patch.key2voiceIndex[midi_key].begin());
+            int voiceIndex = patch->key2voiceIndex[midi_key].front();
+            patch->key2voiceIndex[midi_key].erase(patch->key2voiceIndex[midi_key].begin());
             Release(voiceIndex, nullptr);
         }
     }
@@ -1021,17 +1046,17 @@ void PatchProcessMidi(std::vector<unsigned char> *message, Patch patch)
         switch (cc_number)
         {
         case MIDI_CC_SUSTAIN:
-            patch.sustainPedalOn = (cc_value > 0.5f);
-            std::cout << "Sustain Pedal: " << (patch.sustainPedalOn ? "ON" : "OFF") << std::endl;
-            if (!patch.sustainPedalOn)
+            patch->sustainPedalOn = (cc_value > 0.5f);
+            std::cout << "Sustain Pedal: " << (patch->sustainPedalOn ? "ON" : "OFF") << std::endl;
+            if (!patch->sustainPedalOn)
             {
                 // Release all sustained notes
                 for (int note = 0; note < MIDI_NOTES; note++)
                 {
-                    while (!patch.key2voiceIndex[note].empty())
+                    while (!patch->key2voiceIndex[note].empty())
                     {
-                        int voiceIndex = patch.key2voiceIndex[note].front();
-                        patch.key2voiceIndex[note].erase(patch.key2voiceIndex[note].begin());
+                        int voiceIndex = patch->key2voiceIndex[note].front();
+                        patch->key2voiceIndex[note].erase(patch->key2voiceIndex[note].begin());
                         Release(voiceIndex, nullptr);
                     }
                 }
@@ -1044,13 +1069,13 @@ void PatchProcessMidi(std::vector<unsigned char> *message, Patch patch)
             break;
 
         case MIDI_CC_MODULATION:
-            patch.modulationDepth = cc_value;
-            std::cout << "Modulation Depth: " << patch.modulationDepth << std::endl;
+            patch->modulationDepth = cc_value;
+            std::cout << "Modulation Depth: " << patch->modulationDepth << std::endl;
             break;
 
         case MIDI_CC_EXPRESSION:
-            patch.expression = cc_value;
-            std::cout << "Expression: " << patch.expression << std::endl;
+            patch->expression = cc_value;
+            std::cout << "Expression: " << patch->expression << std::endl;
             break;
 
         default:
@@ -1084,12 +1109,11 @@ void PatchProcessMidi(std::vector<unsigned char> *message, Patch patch)
     }
 }
 
-
 void ProcessMidi(std::vector<unsigned char> *message)
 {
-    for(Patch patch: patches)
+    for (Patch patch : patches)
     {
-        PatchProcessMidi(message, patch);
+        PatchProcessMidi(message, &patch);
     }
 }
 
