@@ -11,6 +11,7 @@
 #include <QtGui/QKeyEvent>
 #include <rtmidi/RtMidi.h>
 #include "sample_compute.hpp"
+#include "patch.hpp"
 #include "key2note.hpp"
 #include "PianoKeyboard.hpp"
 #include <cmath>
@@ -227,6 +228,8 @@ void printHelp()
               << "  --threadcount <n>   Set audio thread count (default: " << threadCount << ")\n"
               << "  --sampleFilename <file>  Set sample file path (default: " << sampleFilename << ")\n";
 }
+
+
 
 int main(int argc, char *argv[])
 {

@@ -182,7 +182,7 @@ protected:
     {
         if (activeKey_)
         {
-            Release(activeKey_->note(), nullptr);
+            Release(activeKey_->note(), nullptr, nullptr);
             activeKey_->setPressed(false);
             activeKey_ = nullptr;
         }

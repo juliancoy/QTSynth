@@ -24,143 +24,81 @@ using json = nlohmann::json;
 #define FILTER_STEPS 512
 // cdef.h
 
-// Cache-friendly sample storage
-struct alignas(64) SampleData
-{                                                 // Align to 64-byte cache line
-    float *samples;                               // Contiguous sample data
-    size_t numFrames;                             // Number of frames
-    size_t numChannels;                           // Number of channels
-    float baseFrequency;                          // Sample frequency
-    float sampleRate;                             // Sample rate
-    int loopStart;                                // Loop start frame
-    int loopLength;                               // Loop length in frames
-    int loopEnd;                                  // Loop end frame
-    float strikeVolume;                           // Strike volume
-    float *envelope;                              // Envelope data
-    std::vector<std::vector<float>> volumeMatrix; // Channel volume matrix per sample
-};
-
-typedef struct Patch
+class SampleCompute
 {
-    // Tuning system mappings
-    std::vector<std::vector<std::vector<int>>> key2sampleIndexAll; // Tuning system, key, samples
-    std::vector<std::vector<std::vector<float>>> key2sampleDetuneAll;
-    std::vector<std::vector<int>> key2voiceIndex;
+public:
+    SampleCompute(int polyphony, int samplesPerDispatch, int lfoCount, int envLenPerPatch, int outchannels, float bendDepth, float outSampleRate, int threadCount);
+    ~SampleCompute();
+    void Dump(const char *filename);
+    void HardStop();
+    void Test();
 
-    std::vector<std::vector<int>> *key2sampleIndex;
-    std::vector<std::vector<float>> *key2sampleDetune;
-
-    bool sustainPedalOn = false;
-    float modulationDepth = 0;
-    float expression = 0;
-    float bendDepth = 2;
-    json key2samples12tet;
-
-    std::vector<SampleData> samplesData; // All samples in contiguous blocks
-
-} Patch;
-
-typedef struct SampleCompute
-{
+    // Parameters of the engine
     int threadCount = 2;
     int polyphony;
     int outSampleRate = 44100; // Default sample rate
+    int outchannels;
+    int envLenPerPatch;
+    bool loop = false;
+    float masterVolume;
+    bool rhodesEffectOn = false;
+    int lfoCount;
+    unsigned int framesPerDispatch;
+
+    // One Mutex for all samples
     std::mutex samplesMutex;
 
+    const double PI = 3.14159265358979323846;
+
+    std::mutex threadVoiceLocks[128]; // Fixed array of locks, one per voice
+
+    int strikeIndex = 0;
+
+    // Global variable to track current tuning system
+    int currentTuningSystem = 0;
+
+    // Internal state of the engine
     std::vector<float> lfoPhase;
     std::vector<float> lfoIncreasePerDispatch;
-
     std::vector<float> dispatchFrameNo;
     std::vector<float> dispatchPhaseClipped;
-
     std::vector<std::vector<float>> outputPhaseFloor;
     std::vector<std::vector<float>> samplesNextWeighted;
     std::vector<std::vector<std::vector<float>>> samples;
     std::vector<std::vector<float>> fadeOut;
-
-    bool rhodesEffectOn = false;
     std::vector<float> rhodesEffect;
     std::vector<float> xfadeTracknot;
     std::vector<float> xfadeTrack;
-
-    int outchannels;
-    int envLenPerPatch;
-    bool loop = false;
     std::vector<SampleData *> voiceSamplePtr;
     std::vector<float> slaveFade;
     std::vector<float> voiceDetune;
     std::vector<float> noLoopFade;
-
     std::vector<std::vector<float>> accumulation;
     std::vector<std::vector<float>> sampleWithinDispatchPostBend;
-
-    float masterVolume;
-
     std::vector<float> pitchWheel;
     std::vector<float> portamento;
     std::vector<float> portamentoAlpha;
     std::vector<float> portamentoTarget;
-
     std::vector<float> releaseVol;
     std::vector<float> combinedEnvelope;
     std::vector<float> velocityVol;
     std::vector<float> indexInEnvelope;
     std::vector<int> envelopeEnd;
-
     std::vector<float> currEnvelopeVol;
     std::vector<float> nextEnvelopeVol;
-    int lfoCount;
-    unsigned int framesPerDispatch;
-} SampleCompute;
 
-// Extended ThreadData structure to include outputBuffer
-// Thread pool data structures
-typedef struct ThreadData
-{
-    SampleCompute *sampleCompute;
-    int threadCount;
-    int threadNo;
-    float *outputBuffer;
-    bool shouldExit;
-    pthread_mutex_t mutex;
-    pthread_cond_t condition;
-    bool hasWork;
-    void *(*workFunction)(void *);
-} ThreadData;
+    // Thread pool management
+    void InitThreadPool(int numThreads);
+    void DestroyThreadPool();
 
-// Thread pool management
-void InitThreadPool(int numThreads);
-void DestroyThreadPool();
-
-// Internal "private" functions
-void Init(int polyphony, int samplesPerDispatch, int lfoCount, int envLenPerPatch, int outchannels, float bendDepth, float sampleRate, int threadCount);
-void SetVolume(float newVol);
-void InitAudio(int bufferCount);
-void DeInitAudio();
-void SetPitchBend(float bend, int index);
-void UpdateDetune(float detune, int index);
-int GetEnvLenPerPatch();
-int AdvanceEnvelope();
-void ApplyPanning();
-int AppendSample(std::vector<float> samples, float sampleRate, int inchannels, float baseFrequency);
-void DeleteMem(int startAddr, int endAddr);
-void ProcessVoices(int threadNo, int numThreads, float *outputBuffer);
-void SumSamples(int threadNo, int numThreads, float *outputBuffer);
-int Strike(SampleData * sample, float velocity, float sampleDetune, float *patchEnvelope);
-void HardStop();
-void RunMultithread(int numThreads, float *outputBuffer, void *(*threadFunc)(void *));
-void Dump(const char *filename);
-int Release(int midi_key, float *env, Patch * patch);
-void SetTuningSystem(int tuningSystem, Patch * patch);
-void DeleteSample(int sampleNo, Patch * patch);
+    // Internal "private" functions
+    void ProcessVoices(int threadNo, int numThreads, float *outputBuffer);
+    void SumSamples(int threadNo, int numThreads, float *outputBuffer);
+    void RunMultithread(int numThreads, float *outputBuffer, void *(*threadFunc)(void *));
+};
 
 double midiNoteTo12TETFreq(int note);
 
-// Public API
-int LoadRestAudioB64(const json &sample);
-void ProcessMidi(std::vector<unsigned char> *message);
-void LoadSoundJSON(const std::string &filename);
-void Test();
 
 /*
 // 5.1 surround angles (excluding LFE)
