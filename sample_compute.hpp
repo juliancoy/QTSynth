@@ -27,7 +27,7 @@ using json = nlohmann::json;
 class SampleCompute
 {
 public:
-    SampleCompute(int polyphony, int samplesPerDispatch, int lfoCount, int envLenPerPatch, int outchannels, float bendDepth, float outSampleRate, int threadCount);
+    SampleCompute(int polyphony, int framesPerDispatch, int lfoCount, int outchannels, float bendDepth, float outSampleRate, int threadCount);
     ~SampleCompute();
     void Dump(const char *filename);
     void HardStop();
@@ -38,7 +38,6 @@ public:
     int polyphony;
     int outSampleRate = 44100; // Default sample rate
     int outchannels;
-    int envLenPerPatch;
     bool loop = false;
     float masterVolume;
     bool rhodesEffectOn = false;
@@ -54,13 +53,10 @@ public:
 
     int strikeIndex = 0;
 
-    // Global variable to track current tuning system
-    int currentTuningSystem = 0;
-
     // Internal state of the engine
     std::vector<float> lfoPhase;
     std::vector<float> lfoIncreasePerDispatch;
-    std::vector<float> dispatchFrameNo;
+    std::vector<float> voiceDispatchFrameNo;
     std::vector<float> dispatchPhaseClipped;
     std::vector<std::vector<float>> outputPhaseFloor;
     std::vector<std::vector<float>> samplesNextWeighted;
@@ -80,10 +76,9 @@ public:
     std::vector<float> portamentoAlpha;
     std::vector<float> portamentoTarget;
     std::vector<float> releaseVol;
-    std::vector<float> combinedEnvelope;
+    std::vector<std::vector<float> *> voiceEnvelope;
     std::vector<float> velocityVol;
     std::vector<float> indexInEnvelope;
-    std::vector<int> envelopeEnd;
     std::vector<float> currEnvelopeVol;
     std::vector<float> nextEnvelopeVol;
 
@@ -98,7 +93,7 @@ public:
 };
 
 double midiNoteTo12TETFreq(int note);
-
+void Test();
 
 /*
 // 5.1 surround angles (excluding LFE)

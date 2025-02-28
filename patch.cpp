@@ -9,8 +9,8 @@
 #include <mutex>
 #include "dr_wav.h"
 
-#include "tuning.hpp"
 #include "patch.hpp"
+#include "tuning.hpp"
 #define MIDI_KEY_COUNT 128
 
 #define DR_WAV_IMPLEMENTATION
@@ -79,7 +79,7 @@ int Patch::AppendSample(std::vector<float> samples, float sampleRate, int inchan
     // For example if the input is Mono, it should distribute even power to both sides
     // the same amound of power that the left channel of a stereo signal puts out on one
     // 2D vector to store gains: gains[inchannel][outchannel]
-    std::vector<std::vector<float>> volumeMatrix(inchannels, std::vector<float>(outchannels, 0.0f));
+    std::vector<std::vector<float>> volumeMatrix(inchannels, std::vector<float>(compute->outchannels, 0.0f));
 
     for (size_t inchannel = 0; inchannel < inchannels; inchannel++)
     {
@@ -88,10 +88,10 @@ int Patch::AppendSample(std::vector<float> samples, float sampleRate, int inchan
 
         float totalPower = 0.0f;
 
-        for (size_t outchannel = 0; outchannel < outchannels; outchannel++)
+        for (size_t outchannel = 0; outchannel < compute->outchannels; outchannel++)
         {
             // Calculate the angle of the current output channel
-            float outChannelAngle = outchannels * M_PI / 2 + outchannel * 2.0f * M_PI / outchannels;
+            float outChannelAngle = compute->outchannels * M_PI / 2 + outchannel * 2.0f * M_PI / compute->outchannels;
 
             // Calculate angular distance between input and output channels
             float angleDiff = fmodf(std::abs(inChannelAngle - outChannelAngle), 2 * M_PI);
@@ -110,13 +110,13 @@ int Patch::AppendSample(std::vector<float> samples, float sampleRate, int inchan
 
         // Normalize for constant power
         float normalizationFactor = 1.0f / std::sqrt(totalPower);
-        for (size_t outchannel = 0; outchannel < outchannels; outchannel++)
+        for (size_t outchannel = 0; outchannel < compute->outchannels; outchannel++)
         {
             volumeMatrix[inchannel][outchannel] *= normalizationFactor;
         }
     }
 
-    std::lock_guard<std::mutex> lock(samplesMutex);
+    std::lock_guard<std::mutex> lock(compute->samplesMutex);
 
     SampleData newSample;
     newSample.volumeMatrix = volumeMatrix;
@@ -146,113 +146,67 @@ void Patch::DeleteSample(int sampleNo)
 
 int Patch::Strike(SampleData *sample, float velocity, float sampleDetune)
 {
-    std::lock_guard<std::mutex> lock(threadVoiceLocks[strikeIndex * threadCount / polyphony]);
-
-    SampleCompute sc = *compute;
+    std::lock_guard<std::mutex> lock(compute->threadVoiceLocks[compute->strikeIndex * compute->threadCount / compute->polyphony]);
+    int strikeIndex = compute->strikeIndex;
     // std::cout << "Striking sample " << sampleNo << " at strike index " << strikeIndex << std::endl;
     compute->xfadeTrack[strikeIndex] = 0;
     compute->xfadeTracknot[strikeIndex] = 1;
-    compute->dispatchFrameNo[strikeIndex] = 0;
+    compute->voiceDispatchFrameNo[strikeIndex] = 0;
     compute->slaveFade[strikeIndex] = strikeIndex;
     compute->noLoopFade[strikeIndex] = 1;
 
     // Transfer Sample params to Voice params for sequential access in Run
     compute->voiceSamplePtr[strikeIndex] = sample;
 
-    // If no patch envelope is supplied, all 1
-    if (env == nullptr)
-    {
-        for (int envIndex = 0; envIndex < compute->envLenPerPatch; envIndex++)
-        {
-            int envelopeIndex = strikeIndex * compute->envLenPerPatch + envIndex;
-            compute->combinedEnvelope[envelopeIndex] = 1;
-        }
-    }
-    // Otherwise, load the patch env
-    else
-    {
-        // Assuming 'envLenPerPatch' is the length of 'patchEnvelope'
-        for (int envIndex = 0; envIndex < compute->envLenPerPatch; envIndex++)
-        {
-            int envelopeIndex = strikeIndex * compute->envLenPerPatch + envIndex;
-            compute->combinedEnvelope[envelopeIndex] = compute->patchEnvelope[envIndex];
-        }
-    }
-
+    // Point the envelope to the strike envelope
+    compute->voiceEnvelope[strikeIndex] = &strikeEnvelope;
+            
     // set additional voice init params
-    releaseVol[strikeIndex] = 1;
-    velocityVol[strikeIndex] = velocity / 255.0;
-    indexInEnvelope[strikeIndex] = strikeIndex * envLenPerPatch;
+    compute->releaseVol[strikeIndex] = 1;
+    compute->velocityVol[strikeIndex] = velocity / 255.0;
+    compute->indexInEnvelope[strikeIndex] = 0;
 
-    voiceDetune[strikeIndex] = sampleDetune;
+    compute->voiceDetune[strikeIndex] = sampleDetune;
     // std::cout << "Striking voice " << strikeIndex << " with detune " << voiceDetune[strikeIndex] << std::endl;
 
-    portamento[strikeIndex] = 1;
-    portamentoAlpha[strikeIndex] = 1;
-    portamentoTarget[strikeIndex] = 1;
+    compute->portamento[strikeIndex] = 1;
+    compute->portamentoAlpha[strikeIndex] = 1;
+    compute->portamentoTarget[strikeIndex] = 1;
 
     // implement Round Robin for simplicity
-    strikeIndex = (strikeIndex + 1) % polyphony;
-    return (strikeIndex + polyphony - 1) % polyphony;
+    strikeIndex = (strikeIndex + 1) % compute->polyphony;
+    return (strikeIndex + compute->polyphony - 1) % compute->polyphony;
 }
 
 void Patch::ReleaseAll()
 {
     for (int key = 0; key < MIDI_KEY_COUNT; key++)
-        while (Release(key, env, nullptr));
+        while (Release(key, 127));
 }
 
-int Patch::Release(int midi_key, float *env, Patch *patch)
+int Patch::Release(int midi_key, float velocity)
 {
-    int voicesToRelease = patch->key2voiceIndex[midi_key].size();
+    int voicesToRelease = key2voiceIndex[midi_key].size();
     int voicesReleased = 0;
     for (size_t i = 0; i < voicesToRelease; ++i)
     {
-        if (patch->key2voiceIndex[midi_key].empty())
+        if (key2voiceIndex[midi_key].empty())
         {
             return voicesReleased; // No samples to release
         }
-        int releaseIndex = patch->key2voiceIndex[midi_key].front();
+        int releaseIndex = key2voiceIndex[midi_key].front();
 
-        std::lock_guard<std::mutex> lock(threadVoiceLocks[releaseIndex * threadCount / polyphony]);
+        std::lock_guard<std::mutex> lock(compute->threadVoiceLocks[releaseIndex * compute->threadCount / compute->polyphony]);
 
-        patch->key2voiceIndex[midi_key].erase(patch->key2voiceIndex[midi_key].begin()); // Remove first element
+        key2voiceIndex[midi_key].erase(key2voiceIndex[midi_key].begin()); // Remove first element
 
-        indexInEnvelope[releaseIndex] = releaseIndex * envLenPerPatch;
-        // Apply envelope release if provided
-        if (env != nullptr)
-        {
-            for (int envPosition = 0; envPosition < envLenPerPatch; envPosition++)
-            {
-                int index = releaseIndex * envLenPerPatch + envPosition;
-                combinedEnvelope[index] = env[envPosition] * releaseVol[releaseIndex];
-            }
-        }
-        else
-        {
-            // Default release (full volume fade out)
-
-            for (int envIndex = 0; envIndex < envLenPerPatch; envIndex++)
-            {
-                int envelopeIndex = releaseIndex * envLenPerPatch + envIndex;
-                combinedEnvelope[envelopeIndex] = 1;
-            }
-        }
+        compute->indexInEnvelope[releaseIndex] = 0;
+        
+        // Point the envelope to the strike envelope
+        compute->voiceEnvelope[releaseIndex] = &releaseEnvelope;
         voicesReleased++;
     }
     return voicesToRelease;
-}
-
-void Patch::HardStop()
-{
-    for (int voiceIndex = 0; voiceIndex < polyphony; voiceIndex++)
-    {
-        std::lock_guard<std::mutex> lock(threadVoiceLocks[voiceIndex * threadCount / polyphony]);
-
-        indexInEnvelope[strikeIndex] = strikeIndex * envLenPerPatch;
-        releaseVol[strikeIndex] = 1.0f;
-        velocityVol[strikeIndex] = 0.0f;
-    }
 }
 
 void Patch::DumpSampleInfo(const char *filename)
@@ -272,13 +226,6 @@ void Patch::DumpSampleInfo(const char *filename)
     file.close();
 }
 
-void SampleCompute()
-{
-    std::cout << "Clean up audio and threads" << std::endl;
-
-    // Clean up thread pool
-    DestroyThreadPool();
-}
 
 int Patch::LoadRestAudioB64(const json &sample)
 {
@@ -334,7 +281,7 @@ int Patch::LoadRestAudioB64(const json &sample)
     return 0;
 }
 
-void Patch::GenerateKeymap(double (*tuningSystemFn)(int), Patch *patch)
+void Patch::GenerateKeymap(double (*tuningSystemFn)(int))
 {
     // Create vectors to store sample indices and detune values
     std::vector<std::vector<int>> thisKeyMap(MIDI_NOTES);
@@ -342,7 +289,7 @@ void Patch::GenerateKeymap(double (*tuningSystemFn)(int), Patch *patch)
 
     // Create a temporary map to store pointers for quick lookup
     std::vector<SampleData *> samplePtrs;
-    for (SampleData &sample : patch->samplesData)
+    for (SampleData &sample : samplesData)
     {
         samplePtrs.push_back(&sample);
     }
@@ -358,9 +305,9 @@ void Patch::GenerateKeymap(double (*tuningSystemFn)(int), Patch *patch)
         float closestRatio = 1.0f;
 
         // Only look at samples from the current instrument
-        for (size_t i = 0; i < patch->samplesData.size(); i++)
+        for (size_t i = 0; i < samplesData.size(); i++)
         {
-            SampleData &sample = patch->samplesData[i];
+            SampleData &sample = samplesData[i];
             float difference = std::abs(std::log2(sample.baseFrequency / desiredFrequency));
             if (difference < minDifference)
             {
@@ -384,17 +331,19 @@ void Patch::GenerateKeymap(double (*tuningSystemFn)(int), Patch *patch)
     }
 
     // Add the new keymap to the patch
-    patch->key2sampleIndexAll.push_back(thisKeyMap);
-    patch->key2sampleDetuneAll.push_back(thisDetune);
+    key2sampleIndexAll.push_back(thisKeyMap);
+    key2sampleDetuneAll.push_back(thisDetune);
 }
 
 // Load samples from JSON file
 Patch::Patch(const std::string &filename, SampleCompute * compute)
 {
-    // Create a new patch
-    Patch newPatch;
-    newPatch.bendDepth = 2;
-    newPatch.key2voiceIndex.resize(MIDI_KEY_COUNT);
+    bendDepth = 2;
+    key2voiceIndex.resize(MIDI_KEY_COUNT);
+    strikeEnvelope.resize(envLen);
+    releaseEnvelope.resize(envLen);
+    std::fill(strikeEnvelope.begin(), strikeEnvelope.end(), 1.0f);
+    std::fill(releaseEnvelope.begin(), releaseEnvelope.end(), 1.0f);
 
     std::cout << "Loading " << filename << std::endl;
     // Use memory mapping for large files
@@ -409,9 +358,9 @@ Patch::Patch(const std::string &filename, SampleCompute * compute)
 
     int patchNoInFile = 0;
     // Generate the key bindings
-    newPatch.key2samples12tet = data[patchNoInFile]["key2samples"];
+    key2samples12tet = data[patchNoInFile]["key2samples"];
 
-    bool useExplicitMapping = newPatch.key2samples12tet.size() > 0;
+    bool useExplicitMapping = key2samples12tet.size() > 0;
 
     startSample = currAbsoluteSampleNo;
 
@@ -425,13 +374,13 @@ Patch::Patch(const std::string &filename, SampleCompute * compute)
     }
 
     // If we have explicit key mappings in the JSON, use those
-    if (!newPatch.key2samples12tet.empty())
+    if (!key2samples12tet.empty())
     {
         std::vector<std::vector<int>> thisKeyMap;
         std::vector<std::vector<float>> thisDetune;
         thisKeyMap.resize(MIDI_NOTES);
         thisDetune.resize(MIDI_NOTES);
-        for (const auto &keyAction : newPatch.key2samples12tet)
+        for (const auto &keyAction : key2samples12tet)
         {
             for (const auto &entry : keyAction)
             {
@@ -446,40 +395,37 @@ Patch::Patch(const std::string &filename, SampleCompute * compute)
                 }
             }
         }
-        newPatch.key2sampleIndexAll.push_back(thisKeyMap);
-        newPatch.key2sampleDetuneAll.push_back(thisDetune);
+        key2sampleIndexAll.push_back(thisKeyMap);
+        key2sampleDetuneAll.push_back(thisDetune);
     }
     else
     {
         // Otherwise generate mappings automatically
-        GenerateKeymap(midiNoteTo12TETFreq, &newPatch);
+        GenerateKeymap(midiNoteTo12TETFreq);
     }
 
     // Always generate Maqam Rast mappings
-    GenerateKeymap(midiNoteToMaqamRastFreq, &newPatch);
-    GenerateKeymap(midiNoteToPythagoreanFreq, &newPatch);
-    GenerateKeymap(midiNoteToRagaYamanFreq, &newPatch);
-    GenerateKeymap(midiNoteToBohlenPierceFreq, &newPatch);
-    GenerateKeymap(midiNoteToMaqamBayatiFreq, &newPatch);
-    GenerateKeymap(midiNoteToSlendroPelogFreq, &newPatch);
-    GenerateKeymap(midiNoteToHarmonicSeriesFreq, &newPatch);
+    GenerateKeymap(midiNoteToMaqamRastFreq);
+    GenerateKeymap(midiNoteToPythagoreanFreq);
+    GenerateKeymap(midiNoteToRagaYamanFreq);
+    GenerateKeymap(midiNoteToBohlenPierceFreq);
+    GenerateKeymap(midiNoteToMaqamBayatiFreq);
+    GenerateKeymap(midiNoteToSlendroPelogFreq);
+    GenerateKeymap(midiNoteToHarmonicSeriesFreq);
 
     SetTuningSystem(0);
 
     std::cout << "Finished loading key mappings" << std::endl;
 }
 
-void SetTuningSystem(int tuningSystem)
+void Patch::SetTuningSystem(int tuningSystem)
 {
-    for (Patch &patch : patches)
-    {
-        currentTuningSystem = tuningSystem;
-        patch.key2sampleIndex = &patch.key2sampleIndexAll[tuningSystem];
-        patch.key2sampleDetune = &patch.key2sampleDetuneAll[tuningSystem];
-    }
+    currentTuningSystem = tuningSystem;
+    key2sampleIndex = &key2sampleIndexAll[tuningSystem];
+    key2sampleDetune = &key2sampleDetuneAll[tuningSystem];
 }
 
-void Patch::ProcessMidi(std::vector<unsigned char> *message, Patch *patch)
+void Patch::ProcessMidi(std::vector<unsigned char> *message)
 {
     unsigned int status = message->at(0);
     unsigned int midi_key = message->at(1);
@@ -491,25 +437,25 @@ void Patch::ProcessMidi(std::vector<unsigned char> *message, Patch *patch)
     if ((status & 0xF0) == 0x90 && velocity > 0)
     {
         // Get the vector of sample indices for this MIDI key
-        const auto &sampleIndices = (*patch->key2sampleIndex)[midi_key];
-        const auto &sampleDetunes = (*patch->key2sampleDetune)[midi_key];
+        const auto &sampleIndices = (*key2sampleIndex)[midi_key];
+        const auto &sampleDetunes = (*key2sampleDetune)[midi_key];
 
         // Iterate through each sample index for this key
         for (int sampleNo = 0; sampleNo < sampleIndices.size(); sampleNo++)
         {
-            int voiceIndex = Strike(&patch->samplesData[sampleIndices[sampleNo]], velocity, sampleDetunes[sampleNo], nullptr);
-            patch->key2voiceIndex[midi_key].push_back(voiceIndex);
+            int voiceIndex = Strike(&samplesData[sampleIndices[sampleNo]], velocity, sampleDetunes[sampleNo]);
+            key2voiceIndex[midi_key].push_back(voiceIndex);
         }
     }
 
     // 🎵 **Note Off**
     else if ((status & 0xF0) == 0x80 || ((status & 0xF0) == 0x90 && velocity == 0))
     {
-        while (!patch->key2voiceIndex[midi_key].empty())
+        while (!key2voiceIndex[midi_key].empty())
         {
-            int voiceIndex = patch->key2voiceIndex[midi_key].front();
-            patch->key2voiceIndex[midi_key].erase(patch->key2voiceIndex[midi_key].begin());
-            Release(voiceIndex, nullptr, patch);
+            int voiceIndex = key2voiceIndex[midi_key].front();
+            key2voiceIndex[midi_key].erase(key2voiceIndex[midi_key].begin());
+            Release(voiceIndex, velocity);
         }
     }
 
@@ -522,36 +468,36 @@ void Patch::ProcessMidi(std::vector<unsigned char> *message, Patch *patch)
         switch (cc_number)
         {
         case MIDI_CC_SUSTAIN:
-            patch->sustainPedalOn = (cc_value > 0.5f);
-            std::cout << "Sustain Pedal: " << (patch->sustainPedalOn ? "ON" : "OFF") << std::endl;
-            if (!patch->sustainPedalOn)
+            sustainPedalOn = (cc_value > 0.5f);
+            std::cout << "Sustain Pedal: " << (sustainPedalOn ? "ON" : "OFF") << std::endl;
+            if (!sustainPedalOn)
             {
                 // Release all sustained notes
                 for (int note = 0; note < MIDI_NOTES; note++)
                 {
-                    while (!patch->key2voiceIndex[note].empty())
+                    while (!key2voiceIndex[note].empty())
                     {
-                        int voiceIndex = patch->key2voiceIndex[note].front();
-                        patch->key2voiceIndex[note].erase(patch->key2voiceIndex[note].begin());
-                        Release(voiceIndex, nullptr, patch);
+                        int voiceIndex = key2voiceIndex[note].front();
+                        key2voiceIndex[note].erase(key2voiceIndex[note].begin());
+                        Release(voiceIndex, velocity);
                     }
                 }
             }
             break;
 
         case MIDI_CC_VOLUME:
-            masterVolume = cc_value;
-            std::cout << "Master Volume: " << masterVolume << std::endl;
+            compute->masterVolume = cc_value;
+            std::cout << "Master Volume: " << compute->masterVolume << std::endl;
             break;
 
         case MIDI_CC_MODULATION:
-            patch->modulationDepth = cc_value;
-            std::cout << "Modulation Depth: " << patch->modulationDepth << std::endl;
+            modulationDepth = cc_value;
+            std::cout << "Modulation Depth: " << modulationDepth << std::endl;
             break;
 
         case MIDI_CC_EXPRESSION:
-            patch->expression = cc_value;
-            std::cout << "Expression: " << patch->expression << std::endl;
+            expression = cc_value;
+            std::cout << "Expression: " << expression << std::endl;
             break;
 
         default:
@@ -577,10 +523,10 @@ void Patch::ProcessMidi(std::vector<unsigned char> *message, Patch *patch)
         std::cout << "Pitch Bend: " << frequencyMultiplier << std::endl;
 
         // Apply pitch bend to all active voices
-        for (int voiceIndex = 0; voiceIndex < polyphony; voiceIndex++)
+        for (int voiceIndex = 0; voiceIndex < compute->polyphony; voiceIndex++)
         {
-            std::lock_guard<std::mutex> lock(threadVoiceLocks[voiceIndex * threadCount / polyphony]);
-            pitchWheel[voiceIndex] = frequencyMultiplier;
+            std::lock_guard<std::mutex> lock(compute->threadVoiceLocks[voiceIndex * compute->threadCount / compute->polyphony]);
+            compute->pitchWheel[voiceIndex] = frequencyMultiplier;
         }
     }
 }

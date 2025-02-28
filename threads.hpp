@@ -7,7 +7,7 @@
 // Thread pool data structures
 typedef struct ThreadData
 {
-    SampleCompute *sampleCompute;
+    SampleCompute *compute;
     int threadCount;
     int threadNo;
     float *outputBuffer;
@@ -19,6 +19,9 @@ typedef struct ThreadData
 } ThreadData;
 
 // Buffer size of 64 frames @ 44100Hz = ~1.45ms latency
+
+void InitAudio(int buffercount, unsigned int framesPerDispatch, int * outchannels, unsigned int * sampleRate);
+void DeInitAudio();
 
 void *ProcessVoicesThreadWrapper(void *threadArg);
 void *SumSamplesThreadWrapper(void *threadArg);

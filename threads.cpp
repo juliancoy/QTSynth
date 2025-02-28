@@ -17,7 +17,7 @@ static pthread_t *threads;
 static ThreadData *threadData;
 static int numThreadsInPool;
 
-void InitThreadPool(int numThreads)
+void InitThreadPool(int numThreads, SampleCompute * compute)
 {
     if (threads != nullptr)
     {
@@ -34,6 +34,7 @@ void InitThreadPool(int numThreads)
         threadData[t].threadCount = numThreads;
         threadData[t].shouldExit = false;
         threadData[t].hasWork = false;
+        threadData[t].compute = compute;
         pthread_mutex_init(&threadData[t].mutex, nullptr);
         pthread_cond_init(&threadData[t].condition, nullptr);
 
@@ -71,13 +72,13 @@ void DestroyThreadPool()
     threadData = nullptr;
 }
 
-void RunMultithread(int numThreads, float *outputBuffer, void *(*threadFunc)(void *))
+void RunMultithread(int numThreads, float *outputBuffer, void *(*threadFunc)(void *), SampleCompute * compute)
 {
     // Update thread data and signal work
     for (int t = 0; t < numThreads; t++)
     {
         pthread_mutex_lock(&threadData[t].mutex);
-        threadData[t].sampleCompute = &self;
+        threadData[t].compute = compute;
         threadData[t].outputBuffer = outputBuffer;
         threadData[t].workFunction = threadFunc;
         threadData[t].hasWork = true;
@@ -103,7 +104,7 @@ void RunMultithread(int numThreads, float *outputBuffer, void *(*threadFunc)(voi
 
 void *ProcessVoicesThreadWrapper(void *threadArg)
 {
-    ProcessVoices(((ThreadData *)threadArg)->threadNo,
+    ((ThreadData *)threadArg)->compute->ProcessVoices(((ThreadData *)threadArg)->threadNo,
                   ((ThreadData *)threadArg)->threadCount,
                   ((ThreadData *)threadArg)->outputBuffer);
     return nullptr;
@@ -111,7 +112,7 @@ void *ProcessVoicesThreadWrapper(void *threadArg)
 
 void *SumSamplesThreadWrapper(void *threadArg)
 {
-    SumSamples(((ThreadData *)threadArg)->threadNo,
+    ((ThreadData *)threadArg)->compute->SumSamples(((ThreadData *)threadArg)->threadNo,
                ((ThreadData *)threadArg)->threadCount,
                ((ThreadData *)threadArg)->outputBuffer);
     return nullptr;
@@ -141,11 +142,11 @@ void *ThreadWorker(void *arg)
         // Execute the work function
         if (workFunction == ProcessVoicesThreadWrapper)
         {
-            ProcessVoices(data->threadNo, data->threadCount, data->outputBuffer);
+            data->compute->ProcessVoices(data->threadNo, data->threadCount, data->outputBuffer);
         }
         else if (workFunction == SumSamplesThreadWrapper)
         {
-            SumSamples(data->threadNo, data->threadCount, data->outputBuffer);
+            data->compute->SumSamples(data->threadNo, data->threadCount, data->outputBuffer);
         }
 
         // Mark work as complete
@@ -156,9 +157,9 @@ void *ThreadWorker(void *arg)
 
     return nullptr;
 }
-
 static RtAudio *dac = nullptr;
-void InitAudio(int buffercount)
+
+void InitAudio(int buffercount, unsigned int framesPerDispatch, int * outchannels, unsigned int * sampleRate)
 {
     // Set up RTMIDI
     if (!dac)
@@ -190,10 +191,19 @@ void InitAudio(int buffercount)
     // Set output parameters
     RtAudio::StreamParameters parameters;
     parameters.deviceId = dac->getDefaultOutputDevice();
-    parameters.nChannels = self.outchannels;
+    
+    // Get the default output device's info
+    RtAudio::DeviceInfo deviceInfo = dac->getDeviceInfo(parameters.deviceId);
+    
+    // Use the device's native sample rate and channel count
+    *outchannels = deviceInfo.outputChannels;
+    parameters.nChannels = deviceInfo.outputChannels;
+    *sampleRate = deviceInfo.preferredSampleRate; // Use the preferred sample rate
+
     parameters.firstChannel = 0;
 
-    std::cout << "Opening output stream" << std::endl;
+    std::cout << "Opening output stream with " << parameters.nChannels << " channels and " << *sampleRate << " Hz sample rate" << std::endl;
+
     // Open the stream with minimal buffering for low latency
     try
     {
@@ -203,7 +213,7 @@ void InitAudio(int buffercount)
         // options.flags = RTAUDIO_MINIMIZE_LATENCY; // Request minimum latency
 
         dac->openStream(&parameters, nullptr, RTAUDIO_FLOAT32,
-                        self.outSampleRate, &self.framesPerDispatch, &audioCallback,
+                        *sampleRate, &framesPerDispatch, &audioCallback,
                         nullptr, &options);
         dac->startStream();
     }

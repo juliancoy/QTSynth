@@ -1,209 +1,175 @@
-#include <QtWidgets/QApplication>
-#include <QtWidgets/QMainWindow>
-#include <QtWidgets/QPushButton>
-#include <QtWidgets/QHBoxLayout>
-#include <QtWidgets/QVBoxLayout>
-#include <QtWidgets/QWidget>
-#include <QtWidgets/QSlider>
-#include <QtWidgets/QComboBox>
-#include <QtGui/QPainter>
-#include <QtGui/QMouseEvent>
-#include <QtGui/QKeyEvent>
-#include <rtmidi/RtMidi.h>
-#include "sample_compute.hpp"
-#include "patch.hpp"
-#include "key2note.hpp"
-#include "PianoKeyboard.hpp"
-#include <cmath>
-#include <memory>
-#include <map>
-#include <string>
-#include <vector>
-#include <mutex>
-#include <fstream>
-#include <iostream>
+#include "main.hpp"
 
-typedef struct MIDIDevice
+SynthWindow::SynthWindow()
 {
-    std::vector<Patch> patches;
-    std::unique_ptr<RtMidiIn> midiIn;
-    std::string name;
-} MIDIDevice;
+    std::cout << "Initializing window" << std::endl;
+    setWindowTitle("Qt Sine Synth");
+    resize(600, 200);
 
+    midiIn_ = new RtMidiIn();
 
-class SynthWindow : public QMainWindow
+    auto centralWidget = new QWidget(this);
+    setCentralWidget(centralWidget);
+
+    auto mainLayout = new QVBoxLayout(centralWidget);
+    auto controlLayout = new QHBoxLayout();
+    auto keyboardLayout = new QHBoxLayout();
+
+    // Create tuning system selector
+    tuningSelector_ = new QComboBox(this);
+    tuningSelector_->addItem("12-TET", 0);
+    tuningSelector_->addItem("Rast راست", 1);
+    tuningSelector_->addItem("Pythagorean", 2);
+    tuningSelector_->addItem("Raga Yaman", 3);
+    tuningSelector_->addItem("Bohlen-Pierce", 4);
+    tuningSelector_->addItem("Bayati بياتي", 5);
+    tuningSelector_->addItem("Slendro-Pelog", 6);
+    tuningSelector_->addItem("Harmonic Series", 7);
+    connect(tuningSelector_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &SynthWindow::onTuningChanged);
+    controlLayout->addWidget(tuningSelector_);
+    controlLayout->addStretch();
+
+    keyboard_ = new PianoKeyboard(this);
+    keyboardLayout->addWidget(keyboard_);
+
+    // Create volume slider
+    volumeSlider_ = new QSlider(Qt::Vertical, this);
+    volumeSlider_->setMinimum(0);
+    volumeSlider_->setMaximum(100);
+    volumeSlider_->setValue(50); // Default volume at 50%
+    volumeSlider_->setTickPosition(QSlider::TicksBothSides);
+    volumeSlider_->setTickInterval(10);
+    connect(volumeSlider_, &QSlider::valueChanged, this, &SynthWindow::onVolumeChanged);
+    keyboardLayout->addWidget(volumeSlider_);
+
+    mainLayout->addLayout(controlLayout);
+    mainLayout->addLayout(keyboardLayout);
+
+    // Enable keyboard focus
+    setFocusPolicy(Qt::StrongFocus);
+
+    updateDevices();
+}
+
+SynthWindow::~SynthWindow()
 {
-public:
-    SynthWindow()
+    for (auto &device : MIDIDevices)
     {
-        std::cout << "Initializing window" << std::endl;
-        setWindowTitle("Qt Sine Synth");
-        resize(600, 200);
+        device.midiIn->closePort();
+    }
+}
 
-        auto centralWidget = new QWidget(this);
-        setCentralWidget(centralWidget);
-
-        auto mainLayout = new QVBoxLayout(centralWidget);
-        auto controlLayout = new QHBoxLayout();
-        auto keyboardLayout = new QHBoxLayout();
-
-        // Create tuning system selector
-        tuningSelector_ = new QComboBox(this);
-        tuningSelector_->addItem("12-TET", 0);
-        tuningSelector_->addItem("Rast راست", 1);
-        tuningSelector_->addItem("Pythagorean", 2);
-        tuningSelector_->addItem("Raga Yaman", 3);
-        tuningSelector_->addItem("Bohlen-Pierce", 4);
-        tuningSelector_->addItem("Bayati بياتي", 5);
-        tuningSelector_->addItem("Slendro-Pelog", 6);
-        tuningSelector_->addItem("Harmonic Series", 7);
-        connect(tuningSelector_, QOverload<int>::of(&QComboBox::currentIndexChanged), 
-                this, &SynthWindow::onTuningChanged);
-        controlLayout->addWidget(tuningSelector_);
-        controlLayout->addStretch();
-
-        keyboard_ = new PianoKeyboard(this);
-        keyboardLayout->addWidget(keyboard_);
-
-        // Create volume slider
-        volumeSlider_ = new QSlider(Qt::Vertical, this);
-        volumeSlider_->setMinimum(0);
-        volumeSlider_->setMaximum(100);
-        volumeSlider_->setValue(50); // Default volume at 50%
-        volumeSlider_->setTickPosition(QSlider::TicksBothSides);
-        volumeSlider_->setTickInterval(10);
-        connect(volumeSlider_, &QSlider::valueChanged, this, &SynthWindow::onVolumeChanged);
-        keyboardLayout->addWidget(volumeSlider_);
-
-        mainLayout->addLayout(controlLayout);
-        mainLayout->addLayout(keyboardLayout);
-
-        // Enable keyboard focus
-        setFocusPolicy(Qt::StrongFocus);
-
-        // Initialize MIDI
-        try
+void SynthWindow::updateDevices()
+{
+    // Initialize MIDI
+    try
+    {
+        // Open all available ports
+        unsigned int nPorts = midiIn_->getPortCount();
+        for (unsigned int i = 0; i < nPorts; i++)
         {
-            midiIn_ = std::make_unique<RtMidiIn>();
-
-            // Open all available ports
-            unsigned int nPorts = midiIn_->getPortCount();
-            for (unsigned int i = 0; i < nPorts; i++)
+            try
             {
-                try
-                {
-                    // Create a new MIDI input for each port
-                    auto midiIn = std::make_unique<RtMidiIn>();
-                    midiIn->openPort(i);
-                    midiIn->setCallback(&SynthWindow::midiCallback, this);
-                    midiIn->ignoreTypes(false, false, false);
-                    MIDIDevice newDevice;
-                    newDevice.midiIn = &midiIn;
-                    newDevice.name = midiIn_->getPortName(i);
-                    MIDIDevices.push_back(newDevice);
+                // Create a new MIDI input for each port
+                auto midiIn = RtMidiIn();
+                midiIn.openPort(i);
+                midiIn.setCallback(&SynthWindow::midiCallback, this);
+                midiIn.ignoreTypes(false, false, false);
+                MIDIDevice newDevice;
+                newDevice.midiIn = &midiIn;
+                newDevice.name = midiIn_->getPortName(i);
+                MIDIDevices.push_back(newDevice);
 
-                    std::cout << "Opened MIDI port " << i << ": "
-                              << midiIn_->getPortName(i) << std::endl;
-                }
-                catch (RtMidiError &error)
-                {
-                    error.printMessage();
-                }
+                std::cout << "Opened MIDI port " << i << ": "
+                            << midiIn_->getPortName(i) << std::endl;
             }
-        }
-        catch (RtMidiError &error)
-        {
-            error.printMessage();
-        }
-    }
-
-    ~SynthWindow()
-    {
-        for (auto &device : MIDIDevices)
-        {
-            device.midiIn->closePort();
-        }
-    }
-
-protected:
-    void keyPressEvent(QKeyEvent *event) override
-    {
-        if (event->isAutoRepeat())
-            return;
-
-        auto it = keyToNote_.find(event->key());
-        if (it != keyToNote_.end())
-        {
-            keyboard_->showKeyDepressed(it->second);
-            std::vector<unsigned char> message = {0x90, static_cast<unsigned char>(it->second), 127}; // Note on, note, velocity 127
-            ProcessMidi(&message);
-        }
-    }
-
-    void keyReleaseEvent(QKeyEvent *event) override
-    {
-        if (event->isAutoRepeat())
-            return;
-
-        auto it = keyToNote_.find(event->key());
-        if (it != keyToNote_.end())
-        {
-            std::vector<unsigned char> message = {0x80, static_cast<unsigned char>(it->second), 0}; // Note off
-            ProcessMidi(&message);
-            keyboard_->showKeyReleased(it->second);
-        }
-    }
-
-private:
-    static void midiCallback(double timeStamp, std::vector<unsigned char> *message, void *userData)
-    {
-        auto *window = static_cast<SynthWindow *>(userData);
-        // send it to the synth
-        ProcessMidi(message);
-
-        // update the window appearance as well
-        unsigned char status = message->at(0);
-        unsigned char note = message->at(1);
-        unsigned char velocity = message->at(2);
-
-        if ((status & 0xF0) == 0x90 && velocity > 0)
-        { // Note On
-            window->keyboard_->keyPressed(note);
-        }
-        else if ((status & 0xF0) == 0x80 || ((status & 0xF0) == 0x90 && velocity == 0))
-        { // Note Off
-            window->keyboard_->keyReleased(note);
-        }
-    }
-
-    void onTuningChanged(int index) {
-        for(auto &device: MIDIDevices){
-            for(auto &patch: device.patches){
-                SetTuningSystem(index, &patch); // Pass the tuning system index directly
+            catch (RtMidiError &error)
+            {
+                error.printMessage();
             }
         }
     }
-
-    void onVolumeChanged(int value) {
-        float normalizedVolume = value / 100.0f;
-        SetVolume(normalizedVolume);
+    catch (RtMidiError &error)
+    {
+        error.printMessage();
     }
+}
 
-    PianoKeyboard *keyboard_;
-    QComboBox *tuningSelector_;
-    QSlider *volumeSlider_;
-    std::unique_ptr<RtMidiIn> midiIn_;
-    std::vector<MIDIDevice> MIDIDevices;
-    float currentVolume_ = 0.5f; // Track current volume
-};
+void SynthWindow::keyPressEvent(QKeyEvent *event)
+{
+    if (event->isAutoRepeat())
+        return;
+
+    auto it = keyToNote_.find(event->key());
+    if (it != keyToNote_.end())
+    {
+        keyboard_->showKeyDepressed(it->second);
+        std::vector<unsigned char> message = {0x90, static_cast<unsigned char>(it->second), 127}; // Note on, note, velocity 127
+        ProcessMidi(&message);
+    }
+}
+
+void SynthWindow::keyReleaseEvent(QKeyEvent *event)
+{
+    if (event->isAutoRepeat())
+        return;
+
+    auto it = keyToNote_.find(event->key());
+    if (it != keyToNote_.end())
+    {
+        std::vector<unsigned char> message = {0x80, static_cast<unsigned char>(it->second), 0}; // Note off
+        ProcessMidi(&message);
+        keyboard_->showKeyReleased(it->second);
+    }
+}
+
+void SynthWindow::midiCallback(double timeStamp, std::vector<unsigned char> *message, void *userData)
+{
+    auto *window = static_cast<SynthWindow *>(userData);
+    // send it to the synth
+    ProcessMidi(message);
+
+    // update the window appearance as well
+    unsigned char status = message->at(0);
+    unsigned char note = message->at(1);
+    unsigned char velocity = message->at(2);
+
+    if ((status & 0xF0) == 0x90 && velocity > 0)
+    { // Note On
+        window->keyboard_->keyPressed(note);
+    }
+    else if ((status & 0xF0) == 0x80 || ((status & 0xF0) == 0x90 && velocity == 0))
+    { // Note Off
+        window->keyboard_->keyReleased(note);
+    }
+}
+
+void SynthWindow::onTuningChanged(int index)
+{
+    for (auto &device : MIDIDevices)
+    {
+        for (auto &patch : device.patches)
+        {
+            patch.SetTuningSystem(index); // Pass the tuning system index directly
+        }
+    }
+}
+
+void SynthWindow::onVolumeChanged(int value)
+{
+    float normalizedVolume = value / 100.0f;
+    compute->masterVolume = normalizedVolume;
+}
+
 
 #include <string>
 
 // Handle command line arguments
 std::string sampleFilename = "Harp.json";
 int polyphony = 64;
-int samplesPerDispatch = 128;
-int sampleRate = 44100;
+int framesPerDispatch = 128;
+unsigned int sampleRate; // this gets set to native sample rate of output device
 int lfoCount = 16;
 int envLenPerPatch = 512;
 int outchannels = 2;
@@ -218,8 +184,7 @@ void printHelp()
               << "  --test       Run in test mode\n"
               << "  --help, -h   Show this help message\n"
               << "  --polyphony <n>     Set polyphony (default: " << polyphony << ")\n"
-              << "  --samples <n>       Set samples per dispatch (default: " << samplesPerDispatch << ")\n"
-              << "  --samplerate <n>    Set samples rate (default: " << sampleRate << ")\n"
+              << "  --samples <n>       Set samples per dispatch (default: " << framesPerDispatch << ")\n"
               << "  --lfo <n>           Set LFO count (default: " << lfoCount << ")\n"
               << "  --env <n>           Set envelope length per patch (default: " << envLenPerPatch << ")\n"
               << "  --channels <n>      Set output channels (default: " << outchannels << ")\n"
@@ -229,7 +194,7 @@ void printHelp()
               << "  --sampleFilename <file>  Set sample file path (default: " << sampleFilename << ")\n";
 }
 
-
+SampleCompute *compute;
 
 int main(int argc, char *argv[])
 {
@@ -250,9 +215,7 @@ int main(int argc, char *argv[])
         else if (arg == "--polyphony" && i + 1 < argc)
             polyphony = std::stoi(argv[++i]);
         else if (arg == "--samples" && i + 1 < argc)
-            samplesPerDispatch = std::stoi(argv[++i]);
-        else if (arg == "--samplerate" && i + 1 < argc)
-            sampleRate = std::stoi(argv[++i]);
+            framesPerDispatch = std::stoi(argv[++i]);
         else if (arg == "--lfo" && i + 1 < argc)
             lfoCount = std::stoi(argv[++i]);
         else if (arg == "--env" && i + 1 < argc)
@@ -269,11 +232,12 @@ int main(int argc, char *argv[])
             sampleFilename = argv[++i];
     }
 
+    InitAudio(bufferCount, framesPerDispatch, &outchannels, &sampleRate);
+
     QApplication app(argc, argv);
-    Init(polyphony, samplesPerDispatch, lfoCount, envLenPerPatch, outchannels, bendDepth, sampleRate, threadCount);
-    LoadSoundJSON(sampleFilename);
-    InitAudio(bufferCount);
-    
+    compute = new SampleCompute(polyphony, framesPerDispatch, lfoCount, outchannels, bendDepth, sampleRate, threadCount);
+    Patch *DefaultPatch = new Patch(sampleFilename, compute);
+
     std::cout << "Creating window" << std::endl;
     // Create and show the window
     SynthWindow window;

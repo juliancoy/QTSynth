@@ -26,7 +26,7 @@
 
 #define MIDI_KEY_COUNT 128
 
-SampleCompute::SampleCompute(int polyphony, int samplesPerDispatch, int lfoCount, int envLenPerPatch, int outchannels, float bendDepth, float outSampleRate, int threadCount)
+SampleCompute::SampleCompute(int polyphony, int samplesPerDispatch, int lfoCount, int outchannels, float bendDepth, float outSampleRate, int threadCount)
 {
     // Initialize thread pool first
     InitThreadPool(threadCount);
@@ -35,7 +35,6 @@ SampleCompute::SampleCompute(int polyphony, int samplesPerDispatch, int lfoCount
     outSampleRate = outSampleRate;
     outchannels = outchannels;
     framesPerDispatch = samplesPerDispatch;
-    envLenPerPatch = envLenPerPatch;
     polyphony = polyphony;
     rhodesEffectOn = false;
     loop = false;
@@ -49,19 +48,13 @@ SampleCompute::SampleCompute(int polyphony, int samplesPerDispatch, int lfoCount
     lfoPhase.resize(lfoCount, 0.0f);
     lfoIncreasePerDispatch.resize(lfoCount, 0.0f);
 
-    dispatchFrameNo.resize(polyphony, 0.0f);
+    voiceDispatchFrameNo.resize(polyphony, 0.0f);
 
     outputPhaseFloor.resize(polyphony, std::vector<float>(framesPerDispatch, 0.0f));
     samples.resize(2, std::vector<std::vector<float>>(polyphony, std::vector<float>(framesPerDispatch, 0.0f)));
     fadeOut.resize(polyphony, std::vector<float>(framesPerDispatch, 0.0f));
     accumulation.resize(polyphony, std::vector<float>(framesPerDispatch, 0.0f));
     sampleWithinDispatchPostBend.resize(polyphony, std::vector<float>(framesPerDispatch, 0.0f));
-
-    envelopeEnd.resize(polyphony, 0.0f);
-    for (int voiceNo = 0; voiceNo < polyphony; voiceNo++)
-    {
-        envelopeEnd[voiceNo] = (voiceNo + 1) * envLenPerPatch - 1;
-    }
 
     xfadeTracknot.resize(polyphony, 1.0f);
     xfadeTrack.resize(polyphony, 0.0f);
@@ -76,7 +69,7 @@ SampleCompute::SampleCompute(int polyphony, int samplesPerDispatch, int lfoCount
     portamentoTarget.resize(polyphony, 1.0f);
 
     releaseVol.resize(polyphony, 0.0f);
-    combinedEnvelope.resize(polyphony * envLenPerPatch, 0.0f);
+    voiceEnvelope.resize(polyphony);
     velocityVol.resize(polyphony, 0.0f);
     indexInEnvelope.resize(polyphony, 0.0f);
 
@@ -104,7 +97,7 @@ void SampleCompute::Dump(const char *filename)
 
     output["lfoPhase"] = lfoPhase;
     output["lfoIncreasePerDispatch"] = lfoIncreasePerDispatch;
-    output["dispatchFrameNo"] = dispatchFrameNo;
+    output["dispatchFrameNo"] = voiceDispatchFrameNo;
 
     output["xfadeTracknot"] = xfadeTracknot;
     output["xfadeTrack"] = xfadeTrack;
@@ -119,9 +112,7 @@ void SampleCompute::Dump(const char *filename)
     output["releaseVol"] = releaseVol;
     output["velocityVol"] = velocityVol;
     output["indexInEnvelope"] = indexInEnvelope;
-    output["envelopeEnd"] = envelopeEnd;
     output["nextEnvelopeVol"] = nextEnvelopeVol;
-    output["combinedEnvelope"] = combinedEnvelope;
 
     /*{
         std::lock_guard<std::mutex> lock(blobMutex);
@@ -177,7 +168,8 @@ void SampleCompute::ProcessVoices(int threadNo, int numThreads, float *outputBuf
     for (int voiceNo = firstVoice; voiceNo < lastVoice; voiceNo++)
     {
         SampleData *sample = voiceSamplePtr[voiceNo];
-        float thisEnvelopeVol = combinedEnvelope[(int)(indexInEnvelope[voiceNo])] * releaseVol[voiceNo] * velocityVol[voiceNo];
+        std::vector<float> thisEnv = *voiceEnvelope[voiceNo];
+        float thisEnvelopeVol = thisEnv[(int)(indexInEnvelope[voiceNo])] * releaseVol[voiceNo] * velocityVol[voiceNo];
 
         if (sample == nullptr)
         {
@@ -190,15 +182,13 @@ void SampleCompute::ProcessVoices(int threadNo, int numThreads, float *outputBuf
         int voiceLoopLength = sample->loopLength;
         int voiceLoopStart = sample->loopStart;
 
-        if (indexInEnvelope[voiceNo] < envelopeEnd[voiceNo])
-        {
-            indexInEnvelope[voiceNo]++;
-        }
 
-        nextEnvelopeVol[voiceNo] = combinedEnvelope[(int)(indexInEnvelope[voiceNo])] * releaseVol[voiceNo] * velocityVol[voiceNo];
+        indexInEnvelope[voiceNo] = std::clamp(indexInEnvelope[voiceNo]+1, 0.0f, (float)thisEnv.size());
+
+        nextEnvelopeVol[voiceNo] = thisEnv[(int)(indexInEnvelope[voiceNo])] * releaseVol[voiceNo] * velocityVol[voiceNo];
 
         float difference = nextEnvelopeVol[voiceNo] - thisEnvelopeVol;
-        float dispatchFrameNo = dispatchFrameNo[voiceNo];
+        float dispatchFrameNo = voiceDispatchFrameNo[voiceNo];
 
         // Process each sample within the dispatch
         for (int sampleNo = 0; sampleNo < framesPerDispatch; sampleNo++)
@@ -263,13 +253,13 @@ void SampleCompute::ProcessVoices(int threadNo, int numThreads, float *outputBuf
 
             dispatchFrameNo = std::clamp(dispatchFrameNo + increment, 0.0f, voiceFrameCount - 2.0f);
 
-            if (loop && dispatchFrameNo[voiceNo] >= voiceLoopEnd)
+            if (loop && dispatchFrameNo >= voiceLoopEnd)
             {
                 dispatchFrameNo = voiceLoopStart;
             }
         }
         // Update the dispatch phase for the next cycle
-        dispatchFrameNo[voiceNo] = dispatchFrameNo;
+        voiceDispatchFrameNo[voiceNo] = dispatchFrameNo;
     }
 }
 
@@ -301,14 +291,14 @@ void SampleCompute::HardStop()
     {
         std::lock_guard<std::mutex> lock(threadVoiceLocks[voiceIndex * threadCount / polyphony]);
 
-        indexInEnvelope[strikeIndex] = strikeIndex * envLenPerPatch;
+        indexInEnvelope[strikeIndex] = 0;
         releaseVol[strikeIndex] = 1.0f;
         velocityVol[strikeIndex] = 0.0f;
     }
 }
 
 #define ELEMENTS_TO_PRINT 16
-void Dump(const char *filename)
+void SampleCompute::Dump(const char *filename)
 {
     json output;
 
@@ -319,7 +309,7 @@ void Dump(const char *filename)
 
     output["lfoPhase"] = lfoPhase;
     output["lfoIncreasePerDispatch"] = lfoIncreasePerDispatch;
-    output["dispatchFrameNo"] = dispatchFrameNo;
+    output["dispatchFrameNo"] = voiceDispatchFrameNo;
 
     output["xfadeTracknot"] = xfadeTracknot;
     output["xfadeTrack"] = xfadeTrack;
@@ -334,9 +324,7 @@ void Dump(const char *filename)
     output["releaseVol"] = releaseVol;
     output["velocityVol"] = velocityVol;
     output["indexInEnvelope"] = indexInEnvelope;
-    output["envelopeEnd"] = envelopeEnd;
     output["nextEnvelopeVol"] = nextEnvelopeVol;
-    output["combinedEnvelope"] = combinedEnvelope;
 
     /*{
         std::lock_guard<std::mutex> lock(blobMutex);
@@ -358,6 +346,19 @@ void Dump(const char *filename)
     file.close();
 }
 
+void SampleCompute::HardStop()
+{
+    for (int voiceIndex = 0; voiceIndex < polyphony; voiceIndex++)
+    {
+        std::lock_guard<std::mutex> lock(threadVoiceLocks[voiceIndex * threadCount / polyphony]);
+
+        indexInEnvelope[strikeIndex] = 0;
+        releaseVol[strikeIndex] = 1.0f;
+        velocityVol[strikeIndex] = 0.0f;
+    }
+}
+
+
 // Correct destructor syntax
 SampleCompute::~SampleCompute()
 {
@@ -372,10 +373,12 @@ void Test()
     std::cout << "Test mode activated" << std::endl;
 
     int samples_per_dispatch = 128;
-    SampleCompute sc = SampleCompute(10, samples_per_dispatch, 2, 512, 2, 12, 48000, 4);
+    int outchannels = 2;
+    int outSampleRate = 48000;
+    SampleCompute * compute = new SampleCompute(10, samples_per_dispatch, 2, outchannels, 12, outSampleRate, 4);
     std::cout << "Loading JSON" << std::endl;
-    LoadSoundJSON("Harp.json");
-    DumpSampleInfo("sample_info.json"); // Only dump first buffer for debugging
+    Patch * patch = new Patch("Harp.json", compute);
+    patch->DumpSampleInfo("sample_info.json"); // Only dump first buffer for debugging
 
     std::cout << "Loaded patch" << std::endl;
     std::cout << "Processing MIDI" << std::endl;
@@ -403,28 +406,27 @@ void Test()
         if (i % 100 == 0)
         {
             std::vector<unsigned char> message = {0x90, penta[(i / 100) % 5], 127}; // Note on
-            ProcessMidi(&message);
+            patch->ProcessMidi(&message);
         }
-        ProcessVoices(0, 1, buffer.data() + startIndex);
+        compute->ProcessVoices(0, 1, buffer.data() + startIndex);
+        compute->SumSamples(0, 1, buffer.data() + startIndex);
 
         // Dump first buffer for debugging
         if (i == 0)
-            Dump("dump.json");
+            compute->Dump("dump.json");
     }
 
-    WriteVectorToWav(buffer, "Outfile.wav", outchannels);
-    float env[envLenPerPatch];
-    std::fill_n(env, envLenPerPatch, 0.0f); // ✅ Correct usage of std::fill_n()
-    ReleaseAll(env);
+    WriteVectorToWav(buffer, "Outfile.wav", outchannels, outSampleRate);
+    patch->ReleaseAll();
 
     std::vector<unsigned char> message = {0x90, 45, 127}; // Note on
-    ProcessMidi(&message);
+    patch->ProcessMidi(&message);
 
     for (int i = 0; i < numBuffers; i++)
     {
         // Compute the starting index in the buffer vector
         int startIndex = i * samples_per_dispatch * outchannels;
-        ProcessVoices(0, 1, buffer.data() + startIndex);
+        compute->ProcessVoices(0, 1, buffer.data() + startIndex);
 
         // increase the pitch
         float bendAmount = float(i) / numBuffers;
@@ -436,5 +438,5 @@ void Test()
         // ProcessMidi(&message);
     }
 
-    WriteVectorToWav(buffer, "Bend.wav", outchannels);
+    WriteVectorToWav(buffer, "Bend.wav", outchannels, outSampleRate);
 }
